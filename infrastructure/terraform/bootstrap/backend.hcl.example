@@ -1,0 +1,29 @@
+# Copy this file to backend.hcl and fill in real values -- but ONLY once the
+# state bucket already exists and its hardening has been verified against
+# real AWS output (README.md "Future State Migration Sequence"). backend.hcl
+# is gitignored and must NEVER be committed.
+#
+# Do NOT use this file for the very first `terraform init` / `plan` /
+# `apply` -- at that point the bucket does not exist yet (it is one of the
+# resources main.tf creates), and backend.tf's backend block is still
+# commented out. This file is only relevant once you reach the state
+# migration step and uncomment that block.
+#
+# IMPORTANT: `key` below is the approved bootstrap state key
+# ("bootstrap/terraform.tfstate", Terraform_Bootstrap_Design.md Section 8).
+# Terraform backend configuration is intentionally separate from this root
+# module's input variables (variables.tf) -- backend settings are supplied
+# only via `-backend-config=backend.hcl` at `terraform init` time and are
+# never read from `terraform.tfvars`, so there is no Terraform variable for
+# this value to stay in sync with. If this key is ever deliberately
+# changed, update it here only; there is nothing else to update to match.
+# (Note: the deployment role currently has no permissions policy at all --
+# see main.tf's "Deployment role permissions -- DELIBERATELY NONE ATTACHED"
+# -- so this key governs only the human bootstrap identity's own state
+# operations, not any role's scoped access.)
+
+bucket       = "<STATE_BUCKET_NAME>" # must match state_bucket_name in terraform.tfvars
+key          = "bootstrap/terraform.tfstate" # the approved bootstrap state key
+region       = "ap-south-1"
+encrypt      = true                          # confirms server-side encryption on write; the bucket itself is always encrypted regardless (main.tf)
+use_lockfile = true                          # native S3 locking -- no DynamoDB table

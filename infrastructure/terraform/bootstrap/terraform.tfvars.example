@@ -1,0 +1,40 @@
+# Copy this file to terraform.tfvars and fill in real, account-specific
+# values. terraform.tfvars is gitignored and must NEVER be committed.
+#
+# Nothing in this file is a real value -- every account-specific field
+# below is a placeholder. See variables.tf for full descriptions.
+
+aws_region   = "ap-south-1"
+project_name = "enterprise-data-platform"
+environment  = "shared" # fixed for this root module -- do not change
+
+owner               = "DataEngAA"
+cost_center         = "personal-learning"
+data_classification = "internal"
+
+# 12-digit AWS account ID this configuration must run against -- used as an
+# `allowed_account_ids` safety check (providers.tf) so an apply aborts if
+# the active credentials resolve to the wrong account. Get it with:
+#   aws sts get-caller-identity --query Account --output text
+aws_account_id = "<AWS_ACCOUNT_ID>"
+
+# Must be a globally unique S3 bucket name across ALL AWS accounts.
+# Recommended pattern (Terraform_Bootstrap_Design.md Section 7):
+#   enterprise-data-platform-tfstate-<AWS_ACCOUNT_ID>
+# Get your account ID with the same command as above.
+state_bucket_name = "<STATE_BUCKET_NAME>"
+
+# ARN of the human IAM identity that will run this bootstrap apply. This
+# implementation supports an IAM USER only (arn:aws:iam::<account-id>:user/
+# <user-name>) -- IAM Identity Center / STS assumed-role identities are not
+# yet supported by this trust-policy design (see variables.tf and
+# README.md "Prerequisites"). Get it with:
+#   aws sts get-caller-identity --query Arn --output text
+human_bootstrap_principal_arn = "<HUMAN_BOOTSTRAP_PRINCIPAL_ARN>"
+
+deployment_role_name                 = "enterprise-data-platform-shared-deployment-role"
+deployment_role_max_session_duration = 3600
+
+# Optional additional resource-level tags, merged with the required tags
+# already applied via locals.tf. Leave empty ({}) if none are needed.
+additional_tags = {}
