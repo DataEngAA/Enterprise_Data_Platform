@@ -11,6 +11,12 @@
 # development -- Section 29 should be reviewed/updated to reflect this
 # addition explicitly.
 #
+# v1.1.1: Amazon Linux 2023 ships `curl-minimal` by default, which conflicts
+# with the full `curl` package at the RPM level (dnf refuses to install
+# `curl` over `curl-minimal`). The core-tooling step below no longer requests
+# `curl` at all; a separate availability check installs `curl-minimal` only
+# if no `curl` command is present under any name.
+#
 # This script has NOT been run against any real instance. It is version-
 # controlled source only.
 #
@@ -98,11 +104,15 @@ readonly WORKSTATION_GROUP="$(id -gn "${WORKSTATION_USER}")"
 # Versioning (Section 29.6) -- identifies which version of this script ran
 # on a given instance, independent of the repository's own git history.
 # Bump this value deliberately whenever the script's behavior changes.
-# v1.1.0 (this revision): workstation-user handling made explicit and safe
-# (see revision note above), Terraform installation added, uv installed in
-# the workstation user's own context instead of root's.
+# v1.1.0: workstation-user handling made explicit and safe (see revision
+# note above), Terraform installation added, uv installed in the workstation
+# user's own context instead of root's.
+# v1.1.1 (this revision): removed `curl` from the core-tooling dnf install
+# (conflicts with AL2023's preinstalled `curl-minimal`); added a separate
+# curl-availability check/fallback install of `curl-minimal` before the
+# Terraform download step, which is the first step that needs `curl`.
 # ---------------------------------------------------------------------------
-readonly BOOTSTRAP_SCRIPT_VERSION="1.1.0"
+readonly BOOTSTRAP_SCRIPT_VERSION="1.1.1"
 readonly VERSION_MARKER_FILE="/etc/bootstrap_workstation_version"
 
 # ---------------------------------------------------------------------------
@@ -131,10 +141,31 @@ log "STEP system package update: complete"
 #    dnf install is naturally idempotent -- an already-installed package is
 #    a no-op, not an error, so no extra guard is needed here (Section 29.3).
 #    unzip is required below by the Terraform install step.
+#    `curl` is deliberately NOT requested here (v1.1.1): Amazon Linux 2023
+#    preinstalls `curl-minimal`, and the full `curl` package conflicts with
+#    it at the RPM level -- `dnf install -y curl` fails outright on a real
+#    AL2023 instance rather than upgrading/coexisting. curl availability is
+#    verified separately, below, immediately before the first step that
+#    needs it.
 # ---------------------------------------------------------------------------
-log "STEP core tooling install: starting (git, jq, unzip, curl, tar, less)"
-dnf install -y git jq unzip curl tar less
+log "STEP core tooling install: starting (git, jq, unzip, tar, less)"
+dnf install -y git jq unzip tar less
 log "STEP core tooling install: complete"
+
+# ---------------------------------------------------------------------------
+# 2a. curl availability (v1.1.1). AL2023 ships `curl-minimal` by default,
+#     which already provides the `curl` command for the download steps
+#     below (Terraform archive/checksum fetch, uv installer). Only install
+#     `curl-minimal` explicitly if no `curl` command is present at all; the
+#     full `curl` package is never installed, avoiding the curl-minimal
+#     conflict entirely.
+# ---------------------------------------------------------------------------
+if ! command -v curl >/dev/null 2>&1; then
+  log "STEP curl availability: curl command missing; installing curl-minimal"
+  dnf install -y curl-minimal
+else
+  log "STEP curl availability: available"
+fi
 
 # ---------------------------------------------------------------------------
 # 3. GitHub CLI -- installed only. Never authenticated by this script
