@@ -1,0 +1,35 @@
+# Copy this file to backend.hcl and fill in real values -- but ONLY once
+# Bootstrap Update 1 has landed (the deployment role has permissions to
+# read/write the dev/terraform.tfstate object and its lock object) and the
+# state bucket itself is already verified (it is -- the Terraform Bootstrap
+# phase is formally complete). backend.hcl is gitignored and must NEVER be
+# committed.
+#
+# `key` below is the approved dev state key
+# (Dev_Environment_Terraform_Implementation_Plan.md Section 10):
+#   dev/terraform.tfstate
+# This lives inside the SAME state bucket bootstrap already created and
+# hardened -- no new bucket. Its lock object (native S3 locking) is
+# dev/terraform.tfstate.tflock -- never manually created, deleted, or
+# manipulated, same rule as bootstrap's own state (README.md "State
+# Safety").
+#
+# The nested assume_role block below is REQUIRED and is the corrected
+# syntax (Section 9) -- there is no standalone top-level `role_arn` field in
+# Terraform's S3 backend schema. This block governs only how Terraform's
+# STATE STORAGE calls (reading/writing dev/terraform.tfstate, acquiring/
+# releasing its native lock) authenticate -- it has no effect on how
+# Terraform authenticates the resource-management API calls made during
+# plan/apply, which are governed entirely by providers.tf's own, separate
+# assume_role block.
+
+bucket       = "<STATE_BUCKET_NAME>" # same bucket bootstrap created -- see infrastructure/terraform/bootstrap's state_bucket_name output
+key          = "dev/terraform.tfstate"
+region       = "ap-south-1"
+encrypt      = true
+use_lockfile = true
+
+assume_role = {
+  role_arn     = "<DEPLOYMENT_ROLE_ARN>"
+  session_name = "terraform-dev-backend"
+}

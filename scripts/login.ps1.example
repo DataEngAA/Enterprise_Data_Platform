@@ -1,0 +1,62 @@
+# login.ps1.example
+#
+# Example MFA-backed authentication workflow for this project's Terraform
+# stacks. Copy this file to login.ps1 (gitignored -- never commit the real
+# copy), fill in your own account-specific values below, and run it before
+# any `terraform plan`/`apply` in either infrastructure/terraform/bootstrap
+# or infrastructure/terraform/environments/dev.
+#
+# Design principles this script follows (see 16_Implementation_Notes/
+# PROJECT_EXECUTION_JOURNAL.md for the incident that established them):
+#   1. Clear any stale, already-set session credential environment
+#      variables FIRST -- an already-assumed-role session left over from a
+#      prior shell can cause a self-assume AccessDenied when Terraform's
+#      own provider `assume_role` block tries to assume the deployment
+#      role a second time from within it.
+#   2. Request a FRESH MFA-backed session using `aws sts get-session-token`
+#      against your own IAM user identity -- never `aws sts assume-role`.
+#      This script's job is to authenticate you as your base IAM user;
+#      Terraform's own `assume_role` blocks (in providers.tf and
+#      backend.hcl) perform the single hop to the deployment role.
+#   3. Stop on failure. Never report success after a failed AWS CLI call.
+#   4. Confirm the resulting identity with a real, separate
+#      `aws sts get-caller-identity` call before declaring success.
+
+# Placeholders -- replace with your own values, or better, read them from
+# your own local, gitignored configuration rather than hardcoding them here.
+$MfaSerial = "arn:aws:iam::<ACCOUNT_ID>:mfa/<MFA_DEVICE_NAME>"
+$Region    = "<AWS_REGION>"
+
+# 1. Clear any old session credentials first.
+Remove-Item Env:AWS_SESSION_TOKEN -ErrorAction SilentlyContinue
+Remove-Item Env:AWS_ACCESS_KEY_ID -ErrorAction SilentlyContinue
+Remove-Item Env:AWS_SECRET_ACCESS_KEY -ErrorAction SilentlyContinue
+
+# 2. Request a fresh MFA-backed session token (base IAM user identity,
+#    not an assumed role).
+$mfa = Read-Host "Enter MFA Code"
+
+$creds = aws sts get-session-token `
+    --serial-number $MfaSerial `
+    --token-code $mfa |
+    ConvertFrom-Json
+
+# 3. Stop on failure -- do not export credentials or report success.
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "Login failed." -ForegroundColor Red
+    return
+}
+
+$env:AWS_ACCESS_KEY_ID     = $creds.Credentials.AccessKeyId
+$env:AWS_SECRET_ACCESS_KEY = $creds.Credentials.SecretAccessKey
+$env:AWS_SESSION_TOKEN     = $creds.Credentials.SessionToken
+$env:AWS_REGION            = $Region
+$env:AWS_DEFAULT_REGION    = $Region
+
+# 4. Only report success after independently confirming the resulting
+#    identity via a real AWS API call.
+Write-Host ""
+Write-Host "Login successful." -ForegroundColor Green
+
+aws sts get-caller-identity

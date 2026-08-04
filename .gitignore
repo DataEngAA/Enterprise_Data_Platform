@@ -1,20 +1,56 @@
-﻿.terraform/
+# Terraform state, locks, and plans -- never commit real state or plan
+# artifacts, which can contain account-specific values and resource IDs.
+.terraform/
 *.tfstate
 *.tfstate.*
 *.tfplan
-terraform.tfvars
-backend.hcl
+*.tflock
 *.auto.tfvars
 *.auto.tfvars.json
 crash.log
 crash.*.log
 .terraformrc
 terraform.rc
-*.pem
-*.key
+schema.json
+
+# Real, account-specific configuration -- only the .example templates are
+# committed. Never commit a real terraform.tfvars or backend.hcl.
+terraform.tfvars
+!terraform.tfvars.example
+backend.hcl
+!backend.hcl.example
+
+# Child-module .terraform.lock.hcl files are temporary validation artifacts
+# from standalone local `terraform init` runs against a reusable module --
+# only the two executable roots (bootstrap/, environments/dev/) commit
+# their own .terraform.lock.hcl.
+infrastructure/terraform/modules/*/.terraform.lock.hcl
+!.terraform.lock.hcl
+
+# Credentials, keys, and secrets
 .env
 .env.*
+*.pem
+*.key
+credentials
+credentials.*
+aws-exports.js
 
-!terraform.tfvars.example
-!backend.hcl.example
-!.terraform.lock.hcl
+# Real authentication scripts -- only the .example template is committed.
+login.ps1
+!scripts/login.ps1.example
+
+# Private / internal working documents -- not part of this public repo.
+Memory.md
+memory.md
+CLAUDE.md
+claude.md
+interview*.md
+17_Interview_Guide/
+
+# Logs, caches, build artifacts
+*.log
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.venv/

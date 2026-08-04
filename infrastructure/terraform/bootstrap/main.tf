@@ -492,14 +492,40 @@ data "aws_iam_policy_document" "deployment_dev_permissions" {
     # original combined statement's image/* entry.
     resources = ["arn:aws:ec2:${var.aws_region}::image/*"]
 
+    # DIAGNOSTIC CONDITIONS RESTORED (2026-07-26) -- investigation closed.
+    # A three-round diagnostic sequence (removing ec2:Owner, then
+    # ec2:InstanceType, then aws:RequestedRegion, one at a time, on real
+    # applies) was run against a real, unexplained ec2:RunInstances
+    # UnauthorizedOperation on this exact AMI resource. The true root cause
+    # turned out to be unrelated to this statement entirely: Terraform was
+    # not actually operating under the deployment role's assumed-role
+    # session during that testing (an MFA/STS credential-flow issue,
+    # resolved separately -- see PROJECT_EXECUTION_JOURNAL.md for the full
+    # incident record). With a genuine deployment-role session in place, the
+    # bare, condition-free version of this statement authorized the launch
+    # successfully, confirming none of these three conditions was ever the
+    # actual blocker. All three are restored below to their intended,
+    # reviewed scope. ec2:Owner and aws:RequestedRegion are restored exactly
+    # as originally designed. ec2:InstanceType's value list additionally
+    # includes t3.small here, matching the still-active, separately-tracked
+    # temporary account-specific workaround on
+    # DevRunInstancesSupportingResources below and in both
+    # environments/dev/variables.tf and modules/ec2-workstation/variables.tf
+    # -- restoring this condition without t3.small would reintroduce a real
+    # regression against the currently-working deployment if ec2:InstanceType
+    # turns out to be evaluated for this resource type after all, even though
+    # it is not expected to apply to the "image" resource type per AWS's own
+    # EC2 condition-key documentation. Revert to ["t3.medium", "t3.large",
+    # "t3.xlarge"] (no t3.small) together with the identical, separately
+    # tracked t3.small removal on DevRunInstancesSupportingResources and in
+    # both variables.tf files once this account's Free Tier launch
+    # restriction is resolved -- see PROJECT_EXECUTION_JOURNAL.md for the
+    # full incident record and revert conditions.
     condition {
       test     = "StringEquals"
       variable = "aws:RequestedRegion"
       values   = [var.aws_region]
     }
-    # ec2:Owner lives ONLY on this statement now -- it applies exclusively
-    # to the AMI resource type, which is the only resource type this
-    # statement's Resource element names.
     condition {
       test     = "StringEquals"
       variable = "ec2:Owner"
@@ -512,6 +538,7 @@ data "aws_iam_policy_document" "deployment_dev_permissions" {
         "t3.medium",
         "t3.large",
         "t3.xlarge",
+        "t3.small",
       ]
     }
   }
@@ -527,6 +554,55 @@ data "aws_iam_policy_document" "deployment_dev_permissions" {
     # the original combined statement's entries for these five types.
     resources = [
       "arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:instance/*",
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+    # TEMPORARY, ACCOUNT-SPECIFIC WORKAROUND (2026-07-26) -- NOT a design
+    # change. This account rejects t3.medium/t3.large/t3.xlarge with a real
+    # RunInstances-time `InvalidParameterCombination: instance type is not
+    # eligible for Free Tier` error (confirmed via manual launch testing;
+    # t3.small, t3.micro, and m7i-flex.large all launch successfully in
+    # this account). t3.small is added here ONLY so this specific, Free-
+    # Tier-restricted account can proceed with implementation and testing
+    # work -- it mirrors the identical, identically-reasoned widening of
+    # the environments/dev and modules/ec2-workstation variable validations
+    # (see those files' comments for the full incident record). The
+    # project's approved default and design target remain t3.medium; this
+    # is not evidence toward EC2_Development_Workstation.md Section 6/28's
+    # separate, still-open "whether t3.small is adopted later" question,
+    # since the cause here is account eligibility, not workload capacity.
+    # Revert to ["t3.medium", "t3.large", "t3.xlarge"] once this account's
+    # restriction is resolved or development moves to an unrestricted
+    # account -- see PROJECT_EXECUTION_JOURNAL.md for the incident record.
+    condition {
+      test     = "StringEquals"
+      variable = "ec2:InstanceType"
+      values = [
+        "t3.medium",
+        "t3.large",
+        "t3.xlarge",
+        "t3.small",
+      ]
+    }
+    # Deliberately NO ec2:Owner condition here -- these five resource types
+    # are not AMIs, and this condition key does not apply to them (see the
+    # comment block above this statement).
+  }
+
+  statement {
+    sid    = "DevRunInstancesSupportingResourcesNonInstance"
+    effect = "Allow"
+    actions = [
+      "ec2:RunInstances",
+    ]
+    # The five non-AMI resource types RunInstances also references in the
+    # same call -- all account/region-scoped, unchanged in substance from
+    # the original combined statement's entries for these five types.
+    resources = [
       "arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:volume/*",
       "arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:network-interface/*",
       "arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:subnet/*",
@@ -538,15 +614,6 @@ data "aws_iam_policy_document" "deployment_dev_permissions" {
       variable = "aws:RequestedRegion"
       values   = [var.aws_region]
     }
-    condition {
-      test     = "StringEquals"
-      variable = "ec2:InstanceType"
-      values = [
-        "t3.medium",
-        "t3.large",
-        "t3.xlarge",
-      ]
-    }
     # Deliberately NO ec2:Owner condition here -- these five resource types
     # are not AMIs, and this condition key does not apply to them (see the
     # comment block above this statement).
@@ -556,7 +623,10 @@ data "aws_iam_policy_document" "deployment_dev_permissions" {
     sid       = "DevRunInstancesTagOnCreate"
     effect    = "Allow"
     actions   = ["ec2:CreateTags"]
-    resources = ["arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:instance/*"]
+    resources = [
+      "arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:instance/*",
+      "arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:volume/*",
+    ]
 
     condition {
       test     = "StringEquals"

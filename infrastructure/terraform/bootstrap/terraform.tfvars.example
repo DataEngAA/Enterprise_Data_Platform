@@ -35,6 +35,14 @@ human_bootstrap_principal_arn = "<HUMAN_BOOTSTRAP_PRINCIPAL_ARN>"
 deployment_role_name                 = "enterprise-data-platform-shared-deployment-role"
 deployment_role_max_session_duration = 3600
 
+# Added for Bootstrap Update 1 -- not account-specific, already defaults to
+# this same value in variables.tf. Shown here only for visibility; override
+# only if environments/dev's own workstation role name is deliberately
+# changed to something else (it must match exactly, or the deployment
+# role's dev-scoped IAM permissions in main.tf will not apply to the real
+# role environments/dev creates).
+# dev_workstation_role_name = "enterprise-data-platform-dev-workstation-role"
+
 # Optional additional resource-level tags, merged with the required tags
 # already applied via locals.tf. Leave empty ({}) if none are needed.
 additional_tags = {}

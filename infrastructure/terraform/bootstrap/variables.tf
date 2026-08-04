@@ -152,3 +152,25 @@ variable "additional_tags" {
   type        = map(string)
   default     = {}
 }
+
+# -----------------------------------------------------------------------
+# Added for Bootstrap Update 1 (Dev_Environment_Terraform_Implementation_
+# Plan.md Section 11) -- the deployment role's dev-scoped permissions
+# policy needs to reference the exact workstation-role/instance-profile
+# name it is permitted to create/manage. Not account-specific -- this is a
+# fixed, approved naming-convention value, so a real default is given here
+# rather than requiring it via terraform.tfvars.
+# -----------------------------------------------------------------------
+
+variable "dev_workstation_role_name" {
+  description = <<-EOT
+    Name of the environments/dev workstation IAM role and its instance
+    profile (Naming_Convention.md IAM role pattern), used ONLY to scope the
+    deployment role's dev-permissions policy (main.tf) to exactly this one
+    role/instance-profile name -- not to create the role itself, which
+    remains environments/dev's own responsibility. Must match the role_name
+    passed into modules/iam-workstation-role from environments/dev/main.tf.
+  EOT
+  type        = string
+  default     = "enterprise-data-platform-dev-workstation-role"
+}
