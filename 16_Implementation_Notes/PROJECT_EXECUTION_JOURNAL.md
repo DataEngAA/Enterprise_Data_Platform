@@ -1043,6 +1043,64 @@ On the real EC2 workstation, via a real Session Manager session:
 
 This documentation-only task did not run any Terraform or AWS CLI command and did not modify any `.tf`/script source. `Memory.md`, `Bootstrap_Checklist.md`, `Bootstrap_Update_1_Execution_Checklist.md`, and `Dev_Environment_Terraform_Implementation_Plan.md` were updated to remove now-stale "pending" wording for Bootstrap Update 2 and to adopt this section's status.
 
+## 27aj. `DevRunInstancesAmi` Authorization Defect Confirmed and Corrected — `ec2:InstanceType` Removed from the AMI Statement (2026-08-04)
+
+**Real evidence.** With the restored `DevRunInstancesAmi` policy deployed to real AWS (Section 27ag), a real `ec2:RunInstances` request was executed with `--dry-run` under the confirmed, genuine deployment-role session. AWS denied it: `UnauthorizedOperation` on `arn:aws:ec2:ap-south-1::image/<AMI_ID>`. `--dry-run` creates no resource; no side effect occurred.
+
+**Root cause, confirmed directly from source, not from a credential issue this time.** `DevRunInstancesAmi`'s `Resource` is `arn:aws:ec2:${var.aws_region}::image/*` (the AMI resource type only), but the statement also carried a `StringEquals` condition on `ec2:InstanceType`. `ec2:InstanceType` is an **instance-resource** condition key — it describes the instance type being launched, not any property of the AMI it boots from — and is not a populated condition key during AMI-side authorization for a `RunInstances` call. Under `StringEquals`, an absent condition key evaluates to no match, so the entire `Allow` statement failed to match on the AMI side and `RunInstances` was denied.
+
+**This corrects two things this project previously got wrong about this same investigation.** Section 27ac/27ag had described the diagnostic-condition restoration as closing the `DevRunInstancesAmi` investigation, and Section 27ac's comments (now corrected in `bootstrap/main.tf`) had treated `ec2:InstanceType` on the AMI statement as a harmless, conservative inclusion. Neither was accurate: the MFA/session root cause identified earlier (Section 27aa) was real and did need fixing, but it did not fully explain this statement's behavior — a second, independent, real authorization defect was present in the same statement and was only found by this real `--dry-run` test.
+
+**Fix, in `bootstrap/main.tf`, `DevRunInstancesAmi` statement only:**
+
+```hcl
+condition {
+  test     = "StringEquals"
+  variable = "ec2:InstanceType"
+  values = [
+    "t3.medium",
+    "t3.large",
+    "t3.xlarge",
+    "t3.small",
+  ]
+}
+```
+
+removed entirely. `ec2:Owner = "amazon"` and `aws:RequestedRegion = var.aws_region` — both genuinely applicable to the AMI resource — are unchanged on this statement. `StringEqualsIfExists` was deliberately not used as an alternative; the correct design is to place a condition key only on the resource type it actually applies to, which is what this fix does. `ec2:InstanceType` remains fully enforced — unchanged — on `DevRunInstancesSupportingResources`, whose `Resource` is the `instance/*` type this condition key is actually defined for. No other statement, condition, resource, `iam:PassRole` restriction, tagging control, or trust policy was touched.
+
+**Verification performed (source only, real toolchain unavailable in this sandbox):** `main.tf` parses cleanly under a Python `hcl2` grammar check. Brace count: 188 open / 188 close (balanced). Statement-block count: unchanged at 30. Condition-block count: 59, down from 60 — exactly the one removed condition, nothing else. `terraform fmt`/`validate`/`plan` were not run here — no `terraform` binary is available in this sandbox (the same recurring environment blocker recorded throughout this project). These must be run for real on the user's own machine before any apply. **No `terraform apply` has been run against this change.**
+
+**Expected plan shape, to be confirmed by a real `terraform plan`:** exactly one resource changed — `aws_iam_policy.deployment_dev_permissions` (a new default policy version reflecting the removed condition on `DevRunInstancesAmi`) — zero added, zero destroyed. Any other proposed change would be unexpected and a stop condition.
+
+This documentation-only task did not run any Terraform or AWS CLI command beyond the real `--dry-run` reported by the user. `Memory.md`, `Bootstrap_Checklist.md`, `Bootstrap_Update_1_Execution_Checklist.md`, and `Dev_Environment_Terraform_Implementation_Plan.md` updated to match. **Next task: run `terraform fmt`/`validate`/`plan` for real, review the plan (expecting exactly the one change above), then apply — followed by a second real `--dry-run` test to confirm the fix actually resolves the authorization failure.**
+
+## 27ak. Final `RunInstances --dry-run` Success; Pre-Phase — Engineering Environment Setup Completed and Validated on Real AWS (2026-08-04)
+
+**Real evidence.** After the `ec2:InstanceType` fix to `DevRunInstancesAmi` (Section 27aj), a fresh `aws ec2 run-instances --dry-run` request was executed under the confirmed shared deployment-role session, against the approved launch path. Result: `DryRunOperation: Request would have succeeded, but DryRun flag is set.` No EC2 instance was created (`--dry-run` never creates a resource on success or failure). This confirms the deployment role is authorized for the approved launch path end to end: the Amazon-owned AMI restriction, the `aws:RequestedRegion` restriction, `ec2:InstanceType` enforcement on the instance-resource statement, and the subnet/security-group/instance-profile/supporting-`RunInstances`-resource permissions all evaluated successfully together. **This closes the future-launch authorization validation item that had been open since Section 27af** — it is the last open IAM-related validation item this project was tracking.
+
+**Phase-boundary correction, flagged before recording completion.** A request to mark "Phase 0" complete on this evidence was checked against `PROJECT_BLUEPRINT.md`, which is authoritative for phase boundaries. §10 (Pre-Phase — Engineering Environment Setup: project planning, AWS account prep, GitHub repo, EC2 dev workstation, dev tool installation, Terraform bootstrap) and §11 (Phase 0 — AWS Platform Foundation: full networking including VPC endpoints/Flow Logs, a broader IAM foundation, CloudTrail/CloudWatch logging and alarms, KMS/Secrets Manager, AWS Budgets managed through Terraform, GitHub Actions CI/CD, recovery/recreation testing, multi-environment groundwork) are two distinct, sequential stages — Phase 0 begins only after Pre-Phase completes. Everything validated in this project to date (bootstrap IAM, the dev VPC/workstation, Bootstrap Update 2, today's `--dry-run`) maps to Pre-Phase's scope; none of Phase 0's own completion criteria (CloudTrail, KMS, Secrets Manager, Budgets-in-Terraform, GitHub Actions, VPC Flow Logs, multi-environment, recovery/recreation testing) have been built or evidenced. This was surfaced to the user rather than silently resolved either way; the user confirmed Pre-Phase framing is correct and Phase 0 must not be described as complete.
+
+**Status: Pre-Phase Engineering Environment Setup completed and validated on real AWS.**
+
+**Full completion evidence, real, on real AWS:**
+
+- MFA-backed IAM user login works (`login.ps1`, confirmed repeatable end to end — Section 27ad/27ae).
+- Terraform assumes the shared deployment role (confirmed across every real `plan`/`apply` in both `bootstrap/` and `environments/dev`).
+- Bootstrap IAM policies are deployed (three managed policies, confirmed live and stable — Section 27x and following).
+- Bootstrap Update 2's trust-policy addition is deployed and validated — the workstation role can assume the shared deployment role, confirmed via a real `aws sts get-caller-identity` plus a real successful `sts:AssumeRole` from the workstation itself (Section 27ai).
+- The EC2 workstation is reachable through AWS Systems Manager Session Manager (confirmed via the real, successful bootstrap-script execution as `ssm-user` — Section 27ah).
+- The workstation instance role can assume the shared deployment role (same evidence as Bootstrap Update 2, above).
+- Workstation bootstrap `bootstrap_workstation.sh` v1.1.1 completed successfully on the real EC2 workstation, Amazon Linux 2023 (Section 27ah).
+- Git, GitHub CLI, Terraform 1.15.8, `uv`, AWS CLI, Python, and `jq` are installed and verified on the real workstation.
+- The `DevRunInstancesAmi` policy defect (`ec2:InstanceType` on an AMI-only statement, evaluated against an unpopulated condition key) was found via a real `--dry-run` denial and corrected in source (Section 27aj).
+- A final `aws ec2 run-instances --dry-run` against the approved launch path returned `DryRunOperation: Request would have succeeded, but DryRun flag is set.` — no EC2 resource was created by the test.
+
+**Explicitly NOT claimed as part of this closure — remains Phase 0 scope, not yet started:** complete networking foundation beyond the current dev VPC/subnet/IGW/route table/security group; VPC endpoints and Flow Logs where required; a broader IAM foundation beyond the current deployment/workstation roles; CloudTrail and CloudWatch logging/alarms; KMS and Secrets Manager; AWS Budgets managed through Terraform (the existing AWS Budget remains a manually managed exception, per the original bootstrap design decision); GitHub Actions CI/CD; recovery and recreation testing (the workstation is Terraform-defined and therefore reproducible by design, but an actual destroy-and-recreate drill has not been performed); and multi-environment groundwork (`test`/`stage`/`prod` do not exist).
+
+**Also not separately re-verified in this closure**, consistent with this project's evidence discipline: full Pre-Phase §10 Step 5 tool list beyond what's listed above (Docker, dbt, Java, PostgreSQL client, `curl`, `make`, `tmux`, Ruff, Pytest — not covered by today's evidence), VS Code remote development, and an automatic-shutdown/disciplined-stop-process configuration for the workstation. These are noted as open, non-blocking items in `Memory.md` and `Bootstrap_Checklist.md` rather than silently treated as done.
+
+This documentation-only task did not run any Terraform or AWS CLI command beyond the real `--dry-run` reported by the user. `Memory.md`, `Bootstrap_Checklist.md`, `Bootstrap_Update_1_Execution_Checklist.md`, `Dev_Environment_Terraform_Implementation_Plan.md`, and `17_Interview_Guide/Phase_0.md` updated to match. **Next task: Phase 0 — AWS Platform Foundation: perform the formal phase-entry review against `PROJECT_BLUEPRINT.md` §11 and identify the first approved implementation workstream.**
+
 ## 35. How to Update This Journal
 
 - **Append, don't rewrite.** New entries go at the end of the relevant chronological section, or as a new numbered section if they don't fit an existing one. Existing historical entries are not silently rewritten — if a past entry turns out to have been factually wrong, add a dated correction note next to it rather than editing history away.
