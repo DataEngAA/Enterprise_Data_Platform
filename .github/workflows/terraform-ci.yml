@@ -1,0 +1,208 @@
+name: Terraform CI (PR Validation)
+
+# ---------------------------------------------------------------------------
+# Phase 0 CI/CD Foundation -- implementation slice 2A
+# (02_Infrastructure/CI_CD.md Section 7; ADR-0006-cicd-foundation.md).
+#
+# PURPOSE: untrusted, static, credential-free validation for pull requests.
+# This workflow is deliberately safe to run against a pull request from a
+# fork with zero review, because it is architecturally incapable of
+# reaching AWS or any repository secret -- see the "Public-repository
+# safety" notes throughout this file.
+#
+# THIS SLICE DOES NOT:
+#   - authenticate to AWS in any way (no aws-actions/configure-aws-
+#     credentials, no OIDC id-token, no AWS CLI credential of any kind)
+#   - run terraform plan (which would require reading remote state)
+#   - run terraform apply
+#   - request any GITHUB_TOKEN permission beyond contents: read
+#   - depend on any repository secret
+#   - touch infrastructure/terraform/environments/dev's or any other
+#     stack's real backend.hcl/terraform.tfvars (both are gitignored and
+#     never present in a fresh checkout in the first place -- see
+#     .gitignore)
+#
+# A later, separate implementation slice (not this one) will add an
+# OIDC-authenticated plan-only job restricted to non-forked, same-
+# repository pull requests (CI_CD.md Section 7, step 5), and a further,
+# separate slice will add the manual-approval-gated apply workflow
+# (CI_CD.md Section 8). Neither exists yet.
+# ---------------------------------------------------------------------------
+
+on:
+  pull_request:
+    # Deliberately NOT pull_request_target -- see CI_CD.md Section 14
+    # ("pull_request_target dangers"). pull_request runs with the PR
+    # branch's own workflow file and checks out the PR's own code, but
+    # (per GitHub's own documented behavior) does NOT expose repository
+    # secrets or an OIDC-capable token to workflows triggered from a
+    # forked repository -- exactly the safety property this workflow
+    # relies on, on top of never requesting id-token or secrets access in
+    # the first place.
+    #
+    # CORRECTED 2026-08-07 (before the first real GitHub PR test): no
+    # `paths` filter is used here, deliberately. An earlier version of this
+    # trigger restricted runs to `infrastructure/terraform/**` and this
+    # workflow file itself -- but this workflow is intended to become a
+    # required PR check, and a path-filtered required check produces NO
+    # check result at all (not a pass, not a fail) for a PR that happens
+    # to touch none of the matched paths, which can permanently block that
+    # PR from merging. An always-present, deterministic CI result on every
+    # PR is preferred here over the modest savings of skipping this job on
+    # non-Terraform PRs.
+    branches:
+      - main
+
+# ---------------------------------------------------------------------------
+# Workflow-level permissions -- the single most important safety control in
+# this file. contents: read is the only permission granted, to every job,
+# for the whole workflow. No id-token permission (no OIDC token can ever be
+# minted by this workflow, so it is structurally incapable of assuming
+# enterprise-data-platform-shared-github-actions-role or anything else, even
+# if a future edit tried to add an aws-actions/configure-aws-credentials
+# step). No write permission of any kind (no pull-requests: write, no
+# issues: write, no packages: write, nothing) -- this workflow cannot
+# comment on, label, or modify the pull request it runs against.
+# ---------------------------------------------------------------------------
+
+permissions:
+  contents: read
+
+# PR-safe concurrency: a new push to the same PR cancels the previous,
+# still-running validation run for that PR (no value in finishing a stale
+# commit's checks once a newer commit exists), scoped per-workflow-per-PR so
+# it never collides with a different PR's or a different workflow's group.
+# This workflow performs no mutation of any kind, so cancelling an
+# in-progress run has none of the partial-apply risk that would justify
+# cancel-in-progress: false on a mutating workflow (contrast CI_CD.md
+# Section 11's apply-workflow concurrency design, which deliberately does
+# NOT cancel in-progress runs).
+concurrency:
+  group: terraform-ci-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  # Pinned to the exact Terraform version this project has already
+  # installed, used, and recorded real toolchain evidence for on the real
+  # EC2 development workstation and the user's own Windows machine
+  # (16_Implementation_Notes/PROJECT_EXECUTION_JOURNAL.md,
+  # 16_Implementation_Notes/Bootstrap_Checklist.md,
+  # 16_Implementation_Notes/Dev_Environment_Terraform_Implementation_Plan.md)
+  # -- not "latest", and not a new, independently chosen value.
+  TF_VERSION: "1.15.8"
+
+  # Checkov version pin -- see the implementation report for this task for
+  # how this value was determined (a real, dated PyPI/CHANGELOG-confirmed
+  # release, not invented) and CI_CD.md Section 15's now-partially-resolved
+  # unresolved-decision entry on version pinning/update cadence. Re-verify
+  # this pin against https://pypi.org/project/checkov/ before relying on it
+  # long-term -- it was not independently re-confirmed against the exact
+  # latest release available on the day this workflow runs.
+  CHECKOV_VERSION: "3.3.0"
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Job 1: per-stack Terraform format/init/validate, run as an independent
+  # matrix entry per stack (CI_CD.md Section 7, step requirement 5/11) so a
+  # failure in one stack's configuration is immediately, unambiguously
+  # attributable to that stack in the GitHub Actions UI -- never a single
+  # combined job whose failure could belong to any of the five.
+  # -------------------------------------------------------------------------
+  terraform-validate:
+    name: "Terraform Validate (${{ matrix.stack }})"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false # one stack's failure must not hide another stack's own, independent result
+      matrix:
+        stack:
+          - bootstrap
+          - logging
+          - kms-secrets
+          - cost-controls
+          - environments/dev
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false # extra hardening: no git credential is left configured for later steps to (mis)use
+
+      - name: Set up Terraform ${{ env.TF_VERSION }}
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false # plain terraform output, no wrapper JSON envelope needed for these checks
+
+      - name: terraform fmt -check -recursive (${{ matrix.stack }})
+        working-directory: infrastructure/terraform/${{ matrix.stack }}
+        run: terraform fmt -check -recursive
+
+      - name: terraform init -backend=false (${{ matrix.stack }})
+        working-directory: infrastructure/terraform/${{ matrix.stack }}
+        # No -upgrade, no -backend-config of any kind. -backend=false skips
+        # backend initialization entirely -- no state bucket, no
+        # assume_role, no AWS credential of any kind is contacted. Provider
+        # plugin resolution prefers each stack's own checked-in
+        # .terraform.lock.hcl (present for all five stacks in this matrix)
+        # over re-resolving latest-compatible versions, per this slice's
+        # own "prefer the checked-in lock file" requirement -- this is
+        # `terraform init`'s own default behavior when a lock file already
+        # exists in the working directory; no extra flag is needed to
+        # request it.
+        run: terraform init -backend=false
+
+      - name: terraform validate (${{ matrix.stack }})
+        working-directory: infrastructure/terraform/${{ matrix.stack }}
+        run: terraform validate
+
+  # -------------------------------------------------------------------------
+  # Job 2: Checkov IaC security scan (CI_CD.md Section 12, ADR-0006 Option
+  # 5 -- Checkov chosen as the sole primary Terraform IaC scanner, no
+  # second scanner added). Scans Terraform SOURCE only -- no plan JSON, no
+  # state, no AWS credential of any kind. A separate job (not folded into
+  # the matrix above) since it scans the whole infrastructure/terraform
+  # tree in one pass rather than needing per-stack repetition.
+  # -------------------------------------------------------------------------
+  checkov:
+    name: "Checkov IaC Security Scan"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Checkov ${{ env.CHECKOV_VERSION }} (pinned)
+        run: pip install "checkov==${{ env.CHECKOV_VERSION }}"
+
+      - name: Run Checkov against infrastructure/terraform
+        # Scans Terraform configuration source statically -- reads .tf
+        # files only, performs no terraform init/plan, contacts no AWS
+        # endpoint, needs no credential. Hard-fails (non-zero exit) on any
+        # FAILED check by default -- intentionally NOT run with
+        # --soft-fail and NOT piped through `|| true`/continue-on-error,
+        # since either would silently suppress a real finding rather than
+        # surface it for review. No --skip-check is passed here: this
+        # project has not yet run Checkov against this codebase for real,
+        # so there is no reviewed, justified exception to encode yet. If a
+        # future real run surfaces a finding that is deliberately accepted
+        # rather than fixed, the required pattern (CI_CD.md Section 12) is
+        # an explicit, individually justified --skip-check entry (or an
+        # equivalent in-repo config file) with a recorded reason -- the
+        # same disposition discipline already used for this project's
+        # Trivy findings (16_Implementation_Notes/Bootstrap_Checklist.md)
+        # -- never a blanket suppression file added to make the job pass.
+        run: |
+          checkov \
+            --directory infrastructure/terraform \
+            --framework terraform \
+            --compact \
+            --download-external-modules false
