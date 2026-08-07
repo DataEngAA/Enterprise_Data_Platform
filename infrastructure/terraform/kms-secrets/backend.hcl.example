@@ -1,0 +1,31 @@
+# Copy this file to backend.hcl and fill in real values. backend.hcl is
+# gitignored and must NEVER be committed.
+#
+# `key` below is the approved kms-secrets state key
+# (KMS_and_Secrets.md Section 10):
+#   kms-secrets/terraform.tfstate
+# This lives inside the SAME state bucket bootstrap already created and
+# hardened -- no new bucket. Its lock object (native S3 locking) is
+# kms-secrets/terraform.tfstate.tflock -- never manually created, deleted,
+# or manipulated, same rule as every other state key in this project
+# (README.md "State Safety").
+#
+# The nested assume_role block below is REQUIRED, matching
+# environments/dev/backend.hcl.example -- unlike logging/backend.hcl.example,
+# which deliberately omits it (human-direct auth). This block governs only
+# how Terraform's STATE STORAGE calls (reading/writing
+# kms-secrets/terraform.tfstate, acquiring/releasing its native lock)
+# authenticate -- it has no effect on how Terraform authenticates the
+# resource-management API calls made during plan/apply, which are governed
+# entirely by providers.tf's own, separate assume_role block.
+
+bucket       = "<STATE_BUCKET_NAME>" # same bucket bootstrap created -- see infrastructure/terraform/bootstrap's state_bucket_name output
+key          = "kms-secrets/terraform.tfstate"
+region       = "ap-south-1"
+encrypt      = true
+use_lockfile = true
+
+assume_role = {
+  role_arn     = "<DEPLOYMENT_ROLE_ARN>"
+  session_name = "terraform-kms-secrets-backend"
+}

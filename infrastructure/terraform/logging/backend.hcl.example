@@ -1,0 +1,19 @@
+# Copy this file to backend.hcl and fill in real values. backend.hcl is
+# gitignored and must NEVER be committed.
+#
+# `bucket` is the SAME state bucket bootstrap/ already created and hardened
+# -- no new state bucket is created by this stack. `key` is a NEW,
+# dedicated state key so this stack's state is fully independent of
+# bootstrap's own "bootstrap/terraform.tfstate" and environments/dev's
+# "dev/terraform.tfstate".
+#
+# Unlike environments/dev/backend.hcl.example, there is NO assume_role
+# block here -- this stack authenticates human-direct (providers.tf),
+# matching bootstrap/backend.hcl.example's own pattern, not
+# environments/dev's.
+
+bucket       = "<STATE_BUCKET_NAME>" # same bucket bootstrap/ created -- see infrastructure/terraform/bootstrap's state_bucket_name output
+key          = "logging/terraform.tfstate"
+region       = "ap-south-1"
+encrypt      = true
+use_lockfile = true # native S3 locking -- no DynamoDB table

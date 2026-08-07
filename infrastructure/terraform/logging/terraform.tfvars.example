@@ -1,0 +1,49 @@
+# Copy this file to terraform.tfvars and fill in real, account-specific
+# values. terraform.tfvars is gitignored and must NEVER be committed.
+#
+# Nothing in this file is a real value -- every account-specific field
+# below is a placeholder. See variables.tf for full descriptions.
+
+aws_region   = "ap-south-1"
+project_name = "enterprise-data-platform"
+environment  = "shared" # fixed for this root module -- do not change
+
+owner               = "DataEngAA"
+cost_center         = "personal-learning"
+data_classification = "internal"
+
+# 12-digit AWS account ID this configuration must run against -- used as an
+# `allowed_account_ids` safety check (providers.tf) and to construct the
+# CloudTrail trail's ARN (locals.tf). Get it with:
+#   aws sts get-caller-identity --query Account --output text
+aws_account_id = "<AWS_ACCOUNT_ID>"
+
+# Must be a globally unique S3 bucket name across ALL AWS accounts.
+# Recommended pattern:
+#   enterprise-data-platform-shared-cloudtrail-logs
+# If that collides, append your account ID as a suffix.
+cloudtrail_bucket_name = "<CLOUDTRAIL_BUCKET_NAME>"
+
+# S3 lifecycle tiering for delivered CloudTrail logs -- already defaulted in
+# variables.tf to the approved Phase 0 values; shown here only for
+# visibility. The 365-day expiration is a portfolio-project placeholder,
+# not a compliance-derived number (ADR-0002 "Conditions for
+# Reconsideration") -- override only with a deliberate, documented reason.
+# cloudtrail_s3_ia_transition_days      = 30
+# cloudtrail_s3_glacier_transition_days = 90
+# cloudtrail_s3_expiration_days         = 365
+
+# CloudWatch Logs retention for the CloudTrail log group -- already
+# defaulted to the approved Phase 0 value (90 days); shown here only for
+# visibility.
+# cloudwatch_log_retention_days = 90
+
+# Real email address that receives security-event alarm notifications.
+# Not a secret in the credential sense, but account/operator-specific --
+# never invented or committed. Creates a PENDING SNS subscription only; you
+# must click the confirmation link delivered to this address after apply.
+alert_email = "<ALERT_EMAIL_ADDRESS>"
+
+# Optional additional resource-level tags, merged with the required tags
+# already applied via locals.tf. Leave empty ({}) if none are needed.
+additional_tags = {}
