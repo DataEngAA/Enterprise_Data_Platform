@@ -17,6 +17,10 @@
 # Dedicated CloudTrail audit-log S3 bucket
 # -----------------------------------------------------------------------
 
+#checkov:skip=CKV_AWS_18:No access-logging destination bucket exists yet -- same disposition already accepted for the Terraform state bucket (Trivy AWS-0089, Bootstrap_Checklist.md); a correct implementation needs its own hardened bucket, IAM, and retention policy, deferred to a future monitoring/hardening phase. Checkov triage CKV_AWS_18 (B).
+#checkov:skip=CKV2_AWS_62:Event notifications (EventBridge/SNS on object create/delete) were never part of the Logging design's threat model; only the CloudTrail service principal can write to this bucket today (narrow IAM), bounding the realistic threat surface. Genuinely new design work, not yet scoped. Checkov triage CKV2_AWS_62 (D -- deferred hardening, not an accepted trade-off).
+#checkov:skip=CKV_AWS_144:Cross-region replication explicitly out of scope -- single-region, personal-portfolio project with no DR requirement in PROJECT_BLUEPRINT.md Phase 0; DR belongs to the roadmap's later Phase 9. Checkov triage CKV_AWS_144 (B).
+#checkov:skip=CKV_AWS_145:SSE-S3 (AES256) is an explicit ADR-0002 Option 2 deferral -- CMK migration for logging/storage is a separate, later, explicitly reviewed change now that kms-secrets/ exists in source. Checkov triage CKV_AWS_145 (B).
 resource "aws_s3_bucket" "cloudtrail" {
   bucket = var.cloudtrail_bucket_name
 
@@ -186,6 +190,8 @@ resource "aws_s3_bucket_policy" "cloudtrail" {
 # CloudWatch Logs integration
 # -----------------------------------------------------------------------
 
+#checkov:skip=CKV_AWS_158:CMK encryption for this log group explicitly deferred to a later, separate migration task (ADR-0002 Option 2) -- CloudWatch Logs already encrypts at rest by default (AWS-managed key). Checkov triage CKV_AWS_158 (B).
+#checkov:skip=CKV_AWS_338:90-day retention is an explicit design choice (Logging_and_Audit.md Section 3) -- this log group is for near-term searchability/alarming, not long-term audit retention; the CloudTrail S3 bucket already retains the same content for 365 days. Checkov triage CKV_AWS_338 (B).
 resource "aws_cloudwatch_log_group" "cloudtrail" {
   name              = local.cloudtrail_log_group_name
   retention_in_days = var.cloudwatch_log_retention_days
@@ -257,6 +263,7 @@ resource "aws_iam_role_policy" "cloudtrail_cloudwatch" {
 # CloudTrail trail
 # -----------------------------------------------------------------------
 
+#checkov:skip=CKV_AWS_35:Trail inherits SSE-S3 from the CloudTrail bucket's own encryption configuration -- CMK-encrypted CloudTrail is the same ADR-0002 Option 2 deferral as the log group above, tracked as one future "adopt the CMK for logging" task. Checkov triage CKV_AWS_35 (B). (CKV_AWS_252, the SNS-notification finding on this same resource, is a REAL DEFECT already fixed in source -- NOT skipped.)
 resource "aws_cloudtrail" "this" {
   name           = local.trail_name
   s3_bucket_name = aws_s3_bucket.cloudtrail.id
@@ -264,6 +271,19 @@ resource "aws_cloudtrail" "this" {
   is_multi_region_trail         = true
   include_global_service_events = true
   enable_log_file_validation    = true
+
+  # REAL DEFECT remediation (CKV_AWS_252, real GitHub Actions Checkov run
+  # 2026-08-07, 16_Implementation_Notes/Checkov_Triage_CI_CD_Slice_2A.md).
+  # Wires this trail's own native log-delivery notifications to the
+  # EXISTING aws_sns_topic.security_alerts (defined later in this same
+  # file, already used for the CIS metric-filter alarms below) -- no new
+  # SNS topic is created, and no existing subscription
+  # (aws_sns_topic_subscription.security_alerts_email) is changed. This is
+  # a distinct notification path from the metric-filter alarms: CloudTrail
+  # publishes to this topic on its own log-delivery events (e.g. delivery
+  # failures), independent of what those events' log CONTENT says, which
+  # the metric filters evaluate separately.
+  sns_topic_name = aws_sns_topic.security_alerts.name
 
   # Management events only, both Read and Write -- the first copy is free
   # regardless of trail scope (Logging_and_Audit.md Section 7). No data
@@ -281,9 +301,25 @@ resource "aws_cloudtrail" "this" {
   # access before the trail can be created against this bucket -- see
   # locals.tf's cloudtrail_arn comment for why this is an explicit
   # depends_on rather than an implicit reference-based dependency.
+  #
+  # aws_sns_topic_policy.security_alerts (below) is included here for the
+  # identical reason, added 2026-08-07 after a real `terraform apply`
+  # failed at this exact resource: AWS's UpdateTrail API call rejected the
+  # sns_topic_name argument with InsufficientSnsTopicPolicyException,
+  # because aws_sns_topic.security_alerts previously had no explicit
+  # Terraform-managed policy authorizing cloudtrail.amazonaws.com to
+  # publish to it (AWS's own auto-generated default topic policy grants
+  # the topic owner account full access but grants no other service or
+  # principal anything). Without this depends_on, Terraform's implicit
+  # graph would order aws_cloudtrail.this only after aws_sns_topic.
+  # security_alerts itself (a direct reference via .name), not after the
+  # separate policy resource that actually authorizes the publish -- the
+  # same class of ordering gap the bucket-policy depends_on above already
+  # guards against.
   depends_on = [
     aws_s3_bucket_policy.cloudtrail,
     aws_iam_role_policy.cloudtrail_cloudwatch,
+    aws_sns_topic_policy.security_alerts,
   ]
 
   tags = local.common_tags
@@ -293,10 +329,121 @@ resource "aws_cloudtrail" "this" {
 # SNS topic for security-event notifications
 # -----------------------------------------------------------------------
 
+#checkov:skip=CKV_AWS_26:No kms_master_key_id set -- same Phase 0 KMS-deferral pattern as the log group/trail above; this topic carries alert notifications only (metric-filter descriptions, CloudTrail delivery status), not sensitive application data. Checkov triage CKV_AWS_26 (B).
 resource "aws_sns_topic" "security_alerts" {
   name = local.sns_topic_name
 
   tags = local.common_tags
+}
+
+# ---------------------------------------------------------------------------
+# SNS topic policy -- ADDED 2026-08-07, real-apply-failure remediation.
+#
+# Incident: the CKV_AWS_252 remediation (aws_cloudtrail.this's
+# sns_topic_name argument, added earlier the same day) was applied for
+# real. The apply failed:
+#   aws_cloudtrail.this: Modifying...
+#   FAILED: InsufficientSnsTopicPolicyException: SNS Topic does not exist
+#   or the topic policy is incorrect
+# Root cause: no aws_sns_topic_policy resource existed for
+# aws_sns_topic.security_alerts before this change. A topic with no
+# explicit Terraform-managed policy still has SOME policy in AWS (SNS
+# always auto-generates a default owner-only policy on topic creation),
+# but that default policy authorizes only the topic-owner account -- it
+# grants no permission to any AWS service principal, including
+# cloudtrail.amazonaws.com. CloudTrail's own UpdateTrail/CreateTrail SNS
+# integration requires the target topic's policy to explicitly authorize
+# sns:Publish for the cloudtrail.amazonaws.com service principal; AWS does
+# not grant this implicitly just because the topic exists in the same
+# account.
+#
+# Fix: one aws_sns_topic_policy resource for this exact, already-existing
+# topic (not a second topic, not a second aws_sns_topic_policy competing
+# for the same topic -- none existed before this change, so there is
+# nothing to merge with). Its policy document has exactly two statements:
+#   1. AllowAccountOwnerManageTopic -- reproduces the topic-owner
+#      permissions AWS's own auto-generated default policy already grants,
+#      so that attaching this explicit policy does not silently narrow
+#      what the account/CIS-alarm-module path can already do. Principal is
+#      the exact account root ARN (arn:aws:iam::<account>:root), not
+#      Principal = "*" -- functionally equivalent for "this AWS account
+#      only" scoping, without using an unconditioned wildcard principal.
+#   2. AllowCloudTrailPublish -- the new authorization this incident
+#      requires: principal cloudtrail.amazonaws.com, action sns:Publish
+#      only (not sns:*), resource the exact topic ARN (not Resource = "*"),
+#      restricted with both aws:SourceArn (the exact CloudTrail trail ARN,
+#      local.cloudtrail_arn -- the same deterministic, cycle-free ARN
+#      construction already used by the CloudTrail bucket policy and the
+#      CloudWatch Logs trust policy above) and aws:SourceAccount (this
+#      account only) -- the tightest scoping AWS's CloudTrail-to-SNS
+#      publish integration supports, matching the confused-deputy pattern
+#      already established by data.aws_iam_policy_document.
+#      cloudtrail_cloudwatch_trust above.
+#
+# Preserved, unchanged by this addition: aws_sns_topic.security_alerts's
+# own ARN/name/tags; aws_sns_topic_subscription.security_alerts_email
+# (the existing email subscription); every module.cis_alarms alarm's use
+# of this same topic ARN for its own notification action (unrelated to
+# this topic's resource-based policy, which only governs who may act ON
+# the topic, not what the topic notifies).
+# ---------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "security_alerts_topic_policy" {
+  statement {
+    sid    = "AllowAccountOwnerManageTopic"
+    effect = "Allow"
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${var.aws_account_id}:root"]
+    }
+
+    actions = [
+      "SNS:GetTopicAttributes",
+      "SNS:SetTopicAttributes",
+      "SNS:AddPermission",
+      "SNS:RemovePermission",
+      "SNS:DeleteTopic",
+      "SNS:Subscribe",
+      "SNS:ListSubscriptionsByTopic",
+      "SNS:Publish",
+    ]
+
+    resources = [aws_sns_topic.security_alerts.arn]
+  }
+
+  statement {
+    sid    = "AllowCloudTrailPublish"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudtrail.amazonaws.com"]
+    }
+
+    actions   = ["SNS:Publish"]
+    resources = [aws_sns_topic.security_alerts.arn]
+
+    # Confused-deputy protection, as tight as AWS's CloudTrail SNS
+    # integration supports -- restricted to this exact trail's ARN and
+    # this exact account, not any CloudTrail trail in any account.
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceArn"
+      values   = [local.cloudtrail_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [var.aws_account_id]
+    }
+  }
+}
+
+resource "aws_sns_topic_policy" "security_alerts" {
+  arn    = aws_sns_topic.security_alerts.arn
+  policy = data.aws_iam_policy_document.security_alerts_topic_policy.json
 }
 
 resource "aws_sns_topic_subscription" "security_alerts_email" {

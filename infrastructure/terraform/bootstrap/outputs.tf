@@ -50,3 +50,100 @@ output "deployment_dev_workstation_iam_permissions_policy_json_length" {
   description = "Real, Terraform-computed length (characters) of the workstation-IAM policy's compact rendered JSON -- see deployment_dev_permissions_policy_json_length's description for the same caveat and provenance."
   value       = local.deployment_dev_workstation_iam_permissions_json_length
 }
+
+output "runtime_role_permission_boundary_policy_arn" {
+  description = "ARN of the project-wide (shared) IAM permission boundary for future runtime roles (Lambda/Step Functions v1 scope). Added 2026-08-04 as the first approved Phase 0 IAM Foundation Terraform task -- see 02_Infrastructure/IAM_and_Access.md 'Permission Boundary -- Version 1 Specification' and ADR-0001. Not yet attached to any runtime role -- modules/iam-runtime-role does not exist yet."
+  value       = aws_iam_policy.runtime_role_permission_boundary.arn
+}
+
+output "runtime_role_permission_boundary_policy_json_length" {
+  description = "Real, Terraform-computed length (characters) of the permission boundary's compact rendered JSON -- see deployment_dev_permissions_policy_json_length's description for the same caveat and provenance."
+  value       = local.runtime_role_permission_boundary_json_length
+}
+
+output "deployment_dev_runtime_iam_permissions_policy_arn" {
+  description = "ARN of the deployment role's new, narrowly scoped runtime-role lifecycle managed policy (create/read/manage/delete/attach/PassRole for the 'enterprise-data-platform-dev-runtime-*' role pattern only, boundary-enforced on creation, with an explicit Deny guardrail naming the deployment and workstation roles). Added 2026-08-04 -- see 02_Infrastructure/IAM_and_Access.md 'Runtime-Role Lifecycle -- Version 1' and ADR-0001."
+  value       = aws_iam_policy.deployment_dev_runtime_iam_permissions.arn
+}
+
+output "deployment_dev_runtime_iam_permissions_policy_json_length" {
+  description = "Real, Terraform-computed length (characters) of the runtime-role lifecycle policy's compact rendered JSON -- see deployment_dev_permissions_policy_json_length's description for the same caveat and provenance."
+  value       = local.deployment_dev_runtime_iam_permissions_json_length
+}
+
+output "deployment_dev_networking_observability_permissions_policy_arn" {
+  description = "ARN of the deployment role's new, narrowly scoped managed policy covering the S3 Gateway VPC endpoint, VPC Flow Logs, the Flow Logs CloudWatch Logs log group, and the Flow Logs delivery IAM role (exact-ARN-scoped, not a wildcard pattern). Added 2026-08-07 -- see 02_Infrastructure/Networking.md Section 5 and the Phase 0 Networking Hardening remaining-resource authorization gap record in PROJECT_EXECUTION_JOURNAL.md."
+  value       = aws_iam_policy.deployment_dev_networking_observability_permissions.arn
+}
+
+output "deployment_dev_networking_observability_permissions_policy_json_length" {
+  description = "Real, Terraform-computed length (characters) of the networking-observability policy's compact rendered JSON -- see deployment_dev_permissions_policy_json_length's description for the same caveat and provenance."
+  value       = local.deployment_dev_networking_observability_permissions_json_length
+}
+
+output "deployment_shared_kms_secrets_permissions_policy_arn" {
+  description = "ARN of the deployment role's new, narrowly scoped managed policy covering KMS key/alias lifecycle, Secrets Manager secret metadata (never GetSecretValue/PutSecretValue), and Parameter Store parameter lifecycle for the exact demonstration resources infrastructure/terraform/kms-secrets/ creates. Added 2026-08-07 -- see 02_Infrastructure/KMS_and_Secrets.md and ADR-0004."
+  value       = aws_iam_policy.deployment_shared_kms_secrets_permissions.arn
+}
+
+output "deployment_shared_kms_secrets_permissions_policy_json_length" {
+  description = "Real, Terraform-computed length (characters) of the KMS/Secrets/Parameter Store policy's compact rendered JSON -- see deployment_dev_permissions_policy_json_length's description for the same caveat and provenance."
+  value       = local.deployment_shared_kms_secrets_permissions_json_length
+}
+
+output "deployment_shared_cost_controls_permissions_policy_arn" {
+  description = "ARN of the deployment role's new, narrowly scoped managed policy covering AWS Budgets (ViewBudget/ModifyBudget on the one exact budget), EventBridge Scheduler lifecycle/tagging (on the one exact schedule), the scheduler execution role's IAM lifecycle (on the one exact role), a PassRole grant conditioned to scheduler.amazonaws.com, and ec2:StopInstances scoped to the one, real, already-existing dev workstation instance. Added 2026-08-07 -- see 10_Cost_and_FinOps/Cost_Controls.md and ADR-0005."
+  value       = aws_iam_policy.deployment_shared_cost_controls_permissions.arn
+}
+
+output "deployment_shared_cost_controls_permissions_policy_json_length" {
+  description = "Real, Terraform-computed length (characters) of the Cost Controls policy's compact rendered JSON -- see deployment_dev_permissions_policy_json_length's description for the same caveat and provenance."
+  value       = local.deployment_shared_cost_controls_permissions_json_length
+}
+
+output "deployment_shared_cost_controls_state_permissions_policy_arn" {
+  description = "ARN of the deployment role's dedicated managed policy covering ONLY cost-controls Terraform remote-state access (s3:ListBucket prefix-scoped to cost-controls/terraform.tfstate*, GetObject/PutObject on the exact state object, GetObject/PutObject/DeleteObject on the exact lock object). Split out 2026-08-07 from deployment_dev_permissions after a real terraform plan reported that policy's rendered JSON (6715 characters) exceeded the 6144-character quota -- caught entirely at plan time by that policy's own lifecycle.precondition, no AWS command run, no AWS change occurred. See 10_Cost_and_FinOps/Cost_Controls.md and ADR-0005."
+  value       = aws_iam_policy.deployment_shared_cost_controls_state_permissions.arn
+}
+
+output "deployment_shared_cost_controls_state_permissions_policy_json_length" {
+  description = "Real, Terraform-computed length (characters) of the cost-controls state-access policy's compact rendered JSON -- see deployment_dev_permissions_policy_json_length's description for the same caveat and provenance."
+  value       = local.deployment_shared_cost_controls_state_permissions_json_length
+}
+
+# Added for the Phase 0 CI/CD Foundation implementation slice 1 task
+# (2026-08-07) -- 02_Infrastructure/CI_CD.md, ADR-0006-cicd-foundation.md.
+# Identifiers only, matching this file's own header comment -- no trust
+# policy document, no condition-key values, and no repository identity are
+# reproduced here (those are already visible in main.tf/variables.tf
+# source, not secret, but not duplicated in outputs for their own sake).
+
+output "github_oidc_provider_arn" {
+  description = "ARN of the GitHub Actions OIDC identity provider (token.actions.githubusercontent.com). Needed as an input for any future workflow-file-authoring task's own documentation/verification, and for a real `aws iam get-open-id-connect-provider` confirmation after apply."
+  value       = aws_iam_openid_connect_provider.github_actions.arn
+}
+
+output "github_actions_role_arn" {
+  description = "ARN of the dedicated, near-empty external GitHub Actions OIDC workload-identity role (enterprise-data-platform-shared-github-actions-role). This is the ARN a future GitHub Actions workflow file's own `role-to-assume` input would reference -- not created by this task."
+  value       = aws_iam_role.github_actions.arn
+}
+
+output "github_actions_role_name" {
+  description = "Name of the GitHub Actions OIDC workload-identity role."
+  value       = aws_iam_role.github_actions.name
+}
+
+output "github_actions_permissions_policy_arn" {
+  description = "ARN of the GitHub Actions role's own minimal permissions policy (sts:AssumeRole on the deployment role's exact ARN only)."
+  value       = aws_iam_policy.github_actions_permissions.arn
+}
+
+output "deployment_dev_default_sg_adoption_permissions_policy_arn" {
+  description = "ARN of the deployment role's dedicated managed policy covering ONLY default-security-group adoption (ec2:RevokeSecurityGroupIngress/RevokeSecurityGroupEgress/CreateTags/DeleteTags), scoped to the exact, real, already-existing default security group for the dev VPC (arn:aws:ec2:ap-south-1:732264765658:security-group/sg-043396862de555680), deliberately without any aws:ResourceTag condition (the default SG carries no tags before this first adoption). Split out 2026-08-07 from deployment_dev_networking_permissions after a real terraform plan reported that policy's rendered JSON (6282 characters) exceeded the 6144-character quota -- caught entirely at plan time by that policy's own lifecycle.precondition, no AWS command run, no AWS change occurred. See 16_Implementation_Notes/Checkov_Triage_CI_CD_Slice_2A.md's CKV2_AWS_12 entry."
+  value       = aws_iam_policy.deployment_dev_default_sg_adoption_permissions.arn
+}
+
+output "deployment_dev_default_sg_adoption_permissions_policy_json_length" {
+  description = "Real, Terraform-computed length (characters) of the default-security-group-adoption policy's compact rendered JSON -- see deployment_dev_permissions_policy_json_length's description for the same caveat and provenance."
+  value       = local.deployment_dev_default_sg_adoption_permissions_json_length
+}

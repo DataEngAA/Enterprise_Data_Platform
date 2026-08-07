@@ -18,6 +18,9 @@
 # Customer-managed KMS key
 # -----------------------------------------------------------------------
 
+#checkov:skip=CKV_AWS_111:Root break-glass statement (EnableAccountRootBreakGlassAdministration) intentionally grants kms:* / Resource:"*" to the account root only -- AWS's own required pattern for a key policy to remain manageable; Resource:"*" here means "this key," not "every resource" (KMS-key-policy-specific semantics). Checkov triage 16_Implementation_Notes/Checkov_Triage_CI_CD_Slice_2A.md CKV_AWS_111/356/109 (C), citing bridgecrewio/checkov issues #5148/#5181 and this key's own real IAM-discipline compensating control (only root break-glass + deployment-role administration ever receive a kms: grant on this key).
+#checkov:skip=CKV_AWS_356:Same root break-glass statement as CKV_AWS_111 above -- see that skip's reason and the triage doc's CKV_AWS_111/356/109 entry (C, false positive for KMS key policies specifically).
+#checkov:skip=CKV_AWS_109:Same root break-glass statement as CKV_AWS_111 above -- see that skip's reason and the triage doc's CKV_AWS_111/356/109 entry (C, false positive for KMS key policies specifically).
 resource "aws_kms_key" "this" {
   description = "Shared customer-managed key for the Enterprise Data Platform (KMS_and_Secrets.md). Symmetric ENCRYPT_DECRYPT. Not multi-region -- no cross-region replication requirement exists (KMS_and_Secrets.md Section 2/10)."
 
@@ -181,6 +184,8 @@ data "aws_iam_policy_document" "cmk" {
 # exact CMK ARN -- never a standing, speculative grant.
 # -----------------------------------------------------------------------
 
+#checkov:skip=CKV_AWS_149:Demo secret deliberately uses the AWS-managed default key, not the shared CMK -- a real CreateSecret apply against the CMK-backed design was denied (AccessDeniedException). No real secret value/version exists (Versions: [] always). ADR-0004; Checkov triage CKV_AWS_149 (B).
+#checkov:skip=CKV2_AWS_57:Rotation requires a real secret value and a rotation Lambda; this demo secret is metadata-only (no version), so rotation is meaningless. Checkov triage CKV2_AWS_57 (B).
 resource "aws_secretsmanager_secret" "demo" {
   name        = local.demo_secret_name
   description = "Phase 0 KMS/Secrets Foundation demonstration secret (metadata only -- no version/value managed by Terraform; uses the AWS-managed default key, not the shared project CMK -- see the comment above). Proves the create/tag path only. See KMS_and_Secrets.md Section 13."
@@ -215,6 +220,7 @@ resource "aws_secretsmanager_secret" "demo" {
 # it is simply not what this demonstration resource needs to be.
 # -----------------------------------------------------------------------
 
+#checkov:skip=CKV2_AWS_34:type = "String" is deliberate, not SecureString -- a SecureString value set via a Terraform argument would be written into state in decrypted form, the same risk avoided for Secrets Manager by never creating a version. This value is a non-sensitive literal placeholder. KMS_and_Secrets.md Section 5/13; Checkov triage CKV2_AWS_34 (B).
 resource "aws_ssm_parameter" "demo" {
   name        = local.demo_parameter_name
   description = "Phase 0 KMS/Secrets Foundation demonstration parameter -- non-sensitive placeholder, proves the Parameter Store create/tag path. See KMS_and_Secrets.md Section 13."
