@@ -620,9 +620,9 @@ data "aws_iam_policy_document" "deployment_dev_permissions" {
   }
 
   statement {
-    sid       = "DevRunInstancesTagOnCreate"
-    effect    = "Allow"
-    actions   = ["ec2:CreateTags"]
+    sid     = "DevRunInstancesTagOnCreate"
+    effect  = "Allow"
+    actions = ["ec2:CreateTags"]
     resources = [
       "arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:instance/*",
       "arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:volume/*",
