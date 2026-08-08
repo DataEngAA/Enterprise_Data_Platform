@@ -174,3 +174,111 @@ variable "dev_workstation_role_name" {
   type        = string
   default     = "enterprise-data-platform-dev-workstation-role"
 }
+
+# -----------------------------------------------------------------------
+# NOTE (2026-08-07): a dev_workstation_instance_id variable previously lived
+# here, for deployment_shared_cost_controls_permissions's own
+# ec2:StopInstances grant (main.tf). Removed, along with the corresponding
+# dev_workstation_instance_arn local (locals.tf), when that policy's
+# ec2:StopInstances statement was removed -- the deployment role does not
+# call ec2:StopInstances at all; only the dedicated EventBridge Scheduler
+# execution role does (environments/dev/main.tf), scoped there to
+# module.ec2_workstation.instance_id directly, which needs no separately
+# supplied instance-ID variable in this stack. See main.tf's comment above
+# deployment_shared_cost_controls_permissions for the full, corrected
+# rationale.
+# -----------------------------------------------------------------------
+
+variable "dev_workstation_shutdown_scheduler_role_name" {
+  description = "Name of the environments/dev EventBridge Scheduler execution IAM role for the automatic workstation-shutdown schedule (Naming_Convention.md IAM role pattern), used ONLY to scope deployment_shared_cost_controls_permissions's IAM-management and iam:PassRole statements (main.tf) to exactly this one role -- not to create the role itself, which remains environments/dev's own responsibility. Must match the role name environments/dev/main.tf actually creates. Fixed, non-account-specific naming-convention value, so a real default is given here."
+  type        = string
+  default     = "enterprise-data-platform-dev-workstation-shutdown-scheduler-role"
+}
+
+variable "cost_controls_budget_name" {
+  description = "Name of the shared, account-wide AWS Budget managed by infrastructure/terraform/cost-controls/, used ONLY to scope deployment_shared_cost_controls_permissions's budgets:ViewBudget/ModifyBudget statement (main.tf) to this exact budget -- not to create the budget itself, which remains cost-controls/'s own responsibility. Must match the budget name cost-controls/main.tf actually creates. Fixed, non-account-specific naming-convention value."
+  type        = string
+  default     = "enterprise-data-platform-shared-monthly-budget"
+}
+
+variable "cost_controls_schedule_name" {
+  description = "Name of the EventBridge Scheduler schedule (in the default schedule group) for the automatic workstation-shutdown schedule, used ONLY to scope deployment_shared_cost_controls_permissions's scheduler:* statement (main.tf) to this exact schedule -- not to create the schedule itself, which remains environments/dev's own responsibility. Must match the schedule name environments/dev/main.tf actually creates. Fixed, non-account-specific naming-convention value."
+  type        = string
+  default     = "enterprise-data-platform-dev-workstation-shutdown"
+}
+
+# -----------------------------------------------------------------------
+# Added for the Phase 0 CI/CD Foundation implementation slice 1 task
+# (2026-08-07) -- 02_Infrastructure/CI_CD.md, ADR-0006-cicd-foundation.md.
+# None of these are account-specific in the sense variables.tf's own
+# header comment warns against (no account ID, no ARN, no globally unique
+# bucket name) -- they are either fixed, publicly documented AWS/GitHub
+# OIDC integration values, or this project's own real, explicitly
+# authorized GitHub repository identity, so real defaults are given here
+# rather than requiring them via terraform.tfvars.
+# -----------------------------------------------------------------------
+
+variable "github_repository" {
+  description = <<-EOT
+    Exact GitHub organization/repository (in the form <org>/<repo>) this
+    project's GitHub Actions OIDC trust is restricted to. Used ONLY to
+    build the exact "sub" claim values
+    data.aws_iam_policy_document.github_actions_trust (main.tf) checks via
+    StringEquals -- no wildcard, no org-wide pattern, no other repository
+    can ever satisfy that condition. Explicitly authorized value, not
+    invented: DataEngAA/Enterprise_Data_Platform.
+  EOT
+  type        = string
+  default     = "DataEngAA/Enterprise_Data_Platform"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", var.github_repository))
+    error_message = "github_repository must be in the form <org>/<repo>."
+  }
+}
+
+variable "github_oidc_provider_hostname" {
+  description = "Hostname of GitHub's OIDC token issuer for GitHub Actions -- a fixed, GitHub-documented value, not account-specific. Used to build both the OIDC provider's own URL (aws_iam_openid_connect_provider.github_actions, main.tf) and the exact condition-key names (\"<this value>:aud\", \"<this value>:sub\") IAM evaluates against GitHub's federated token."
+  type        = string
+  default     = "token.actions.githubusercontent.com"
+}
+
+variable "github_actions_oidc_audience" {
+  description = "OIDC audience (\"client ID\") GitHub Actions presents when requesting a token scoped to authenticate into AWS -- the fixed, AWS-documented value for the AWS STS OIDC integration, not account-specific. Used both as the OIDC provider's client_id_list entry and as the exact value the trust policy's \"aud\" condition requires (main.tf)."
+  type        = string
+  default     = "sts.amazonaws.com"
+}
+
+variable "github_actions_environment_name" {
+  description = <<-EOT
+    Name of the protected GitHub Environment whose required-reviewer
+    approval gate is the only way a workflow run can present a "sub" claim
+    of the form repo:<github_repository>:environment:<this value> -- the
+    only sub pattern this workstream's trust policy accepts for a run
+    capable of eventually reaching a mutating deployment-role action once
+    a future workflow implementation slice adds one
+    (02_Infrastructure/CI_CD.md Section 3, Section 8). The GitHub
+    Environment itself, and its required-reviewer configuration, is a
+    GitHub-side setting -- not created, and not creatable, by this
+    Terraform configuration.
+  EOT
+  type        = string
+  default     = "aws-dev"
+}
+
+variable "github_actions_role_name" {
+  description = "Name of the dedicated, near-empty external GitHub Actions OIDC workload-identity IAM role (Naming_Convention.md IAM role naming pattern, \"shared\" environment token since this is a project-wide, not environment-specific, resource -- CI_CD.md)."
+  type        = string
+  default     = "enterprise-data-platform-shared-github-actions-role"
+}
+
+variable "github_actions_role_max_session_duration" {
+  description = "Maximum session duration, in seconds, for the GitHub Actions role. Kept at the same 1-hour default as the deployment role -- this role only ever needs enough time to make a single sts:AssumeRole call onto the deployment role, never to hold a long-lived session of its own."
+  type        = number
+  default     = 3600
+
+  validation {
+    condition     = var.github_actions_role_max_session_duration >= 3600 && var.github_actions_role_max_session_duration <= 43200
+    error_message = "github_actions_role_max_session_duration must be between 3600 (1 hour, the approved default) and 43200 (12 hours, the IAM maximum)."
+  }
+}

@@ -32,4 +32,58 @@ locals {
   # DELIBERATELY NONE ATTACHED" comment. When a future, separately
   # reviewed change adds one, it should follow Naming_Convention.md's IAM
   # policy pattern: <project>-<environment>-<role-purpose>-policy.
+
+  # Bootstrap Update 2 (added): the exact ARN of the environments/dev
+  # workstation IAM role, Terraform-derived from the same two variables
+  # (var.aws_account_id, var.dev_workstation_role_name) already used
+  # throughout main.tf's dev-permissions statements to scope access to
+  # exactly this one role -- never duplicated as a raw string. Used only by
+  # deployment_role_trust's second statement (main.tf) to trust this role
+  # as an additional principal. This does not create the role itself
+  # (still environments/dev's own responsibility) and does not change the
+  # existing human-bootstrap-principal/MFA trust statement.
+  dev_workstation_role_arn = "arn:aws:iam::${var.aws_account_id}:role/${var.dev_workstation_role_name}"
+
+  # Added 2026-08-07 -- Phase 0 CI/CD Foundation implementation slice 1
+  # dependency-propagation correction (02_Infrastructure/CI_CD.md,
+  # ADR-0006-cicd-foundation.md; PROJECT_EXECUTION_JOURNAL.md). A real
+  # bootstrap plan reported an unwanted second change,
+  # aws_iam_policy.deployment_dev_runtime_iam_permissions, even though that
+  # policy's own statements were never intentionally edited. Root cause:
+  # IAM role ARNs are fully deterministic (arn:aws:iam::<account-id>:role/
+  # <role-name>, no random or apply-time-generated component), but using
+  # the RESOURCE reference aws_iam_role.deployment.arn anywhere Terraform
+  # only needed the already-knowable ARN string created a real dependency
+  # edge on that resource's apply. Once data.aws_iam_policy_document.
+  # deployment_role_trust (main.tf) was extended to also reference
+  # aws_iam_role.github_actions.arn (a genuinely new resource, not yet
+  # created), aws_iam_role.deployment itself became dependent on
+  # aws_iam_role.github_actions -- and every OTHER document that referenced
+  # aws_iam_role.deployment.arn (including this pre-existing runtime-IAM
+  # guardrail statement, unrelated to this task) was then forced to treat
+  # that ARN as known-after-apply too, producing an artificial in-place
+  # plan diff on a policy nothing here actually changed.
+  #
+  # Fix: two new locals, computed the exact same way
+  # dev_workstation_role_arn already is above -- from variables only, with
+  # no dependency on any resource's apply-time output -- used everywhere a
+  # reference existed ONLY to obtain an already-knowable ARN (never where a
+  # genuine creation-order dependency is required, e.g. an
+  # aws_iam_role_policy_attachment's own role/policy arguments, which are
+  # left as real resource references). Renders byte-identical policy JSON
+  # to what the resource-attribute references produced -- no ARN value,
+  # principal, resource, action, or condition changes as a result.
+  deployment_role_arn     = "arn:aws:iam::${var.aws_account_id}:role/${var.deployment_role_name}"
+  github_actions_role_arn = "arn:aws:iam::${var.aws_account_id}:role/${var.github_actions_role_name}"
+
+  # NOTE (2026-08-07): a dev_workstation_instance_arn local previously lived
+  # here, for Phase 0 Cost Controls's deployment_shared_cost_controls_
+  # permissions policy (main.tf). Removed, along with the corresponding
+  # dev_workstation_instance_id variable (variables.tf), when that policy's
+  # own ec2:StopInstances statement was removed -- the deployment role does
+  # not call ec2:StopInstances at all; only the dedicated EventBridge
+  # Scheduler execution role does (environments/dev/main.tf), scoped there
+  # to module.ec2_workstation.instance_id directly. See main.tf's comment
+  # above deployment_shared_cost_controls_permissions for the full,
+  # corrected rationale.
 }
