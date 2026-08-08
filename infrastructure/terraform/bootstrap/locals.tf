@@ -76,6 +76,26 @@ locals {
   deployment_role_arn     = "arn:aws:iam::${var.aws_account_id}:role/${var.deployment_role_name}"
   github_actions_role_arn = "arn:aws:iam::${var.aws_account_id}:role/${var.github_actions_role_name}"
 
+  # Added 2026-08-08 -- Phase 0 CI/CD Slice 2B, GitHub OIDC immutable-subject
+  # correction. A real GitHub Actions run failed at
+  # aws-actions/configure-aws-credentials@v4 with "Not authorized to perform
+  # sts:AssumeRoleWithWebIdentity": GitHub's OIDC token issuer now emits
+  # "sub" claims in an immutable-ID format
+  # (repo:<org>@<owner_id>/<repo>@<repo_id>:...), which no longer matches
+  # the legacy, login-name-only subject strings
+  # (repo:<org>/<repo>:...) data.aws_iam_policy_document.github_actions_trust
+  # (main.tf) was built from. github_repository_immutable is the
+  # Terraform-derived equivalent of var.github_repository in this new
+  # format -- split(...) extracts the org and repo name from the existing
+  # "<org>/<repo>" variable so the org/repo login names are still sourced
+  # from var.github_repository (never hand-copied a second time), then the
+  # two GitHub-issued immutable numeric IDs (var.github_owner_id,
+  # var.github_repo_id) are appended in the exact "@<id>" positions
+  # GitHub's own documented format requires. Used ONLY to build the two
+  # "sub" StringEquals values below -- no other statement, role, or policy
+  # references this local.
+  github_repository_immutable = "${split("/", var.github_repository)[0]}@${var.github_owner_id}/${split("/", var.github_repository)[1]}@${var.github_repo_id}"
+
   # NOTE (2026-08-07): a dev_workstation_instance_arn local previously lived
   # here, for Phase 0 Cost Controls's deployment_shared_cost_controls_
   # permissions policy (main.tf). Removed, along with the corresponding
