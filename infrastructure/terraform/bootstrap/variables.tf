@@ -237,6 +237,49 @@ variable "github_repository" {
   }
 }
 
+variable "github_owner_id" {
+  description = <<-EOT
+    GitHub's own immutable numeric ID for the var.github_repository owner
+    (organization/user) -- NOT the org/user login name, which GitHub allows
+    to be renamed. Used ONLY to build the immutable-subject-format "sub"
+    claim values data.aws_iam_policy_document.github_actions_trust (main.tf)
+    checks via StringEquals, per GitHub's current documented OIDC subject
+    format (repo:<org>@<owner_id>/<repo>@<repo_id>:...) -- required because
+    the legacy, login-name-only subject format
+    (repo:<org>/<repo>:...) stopped satisfying GitHub's own token issuance
+    for this repository, causing a real, observed
+    "Not authorized to perform sts:AssumeRoleWithWebIdentity" failure on
+    aws-actions/configure-aws-credentials@v4. Explicitly authorized value,
+    not invented: 172183384 (DataEngAA's real, immutable GitHub owner ID).
+  EOT
+  type        = string
+  default     = "172183384"
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_owner_id))
+    error_message = "github_owner_id must be a numeric GitHub owner ID (digits only)."
+  }
+}
+
+variable "github_repo_id" {
+  description = <<-EOT
+    GitHub's own immutable numeric ID for the var.github_repository
+    repository -- NOT the repository name, which GitHub allows to be
+    renamed. Used ONLY alongside var.github_owner_id to build the
+    immutable-subject-format "sub" claim values (see var.github_owner_id's
+    description for the full rationale). Explicitly authorized value, not
+    invented: 1312536466 (the real, immutable GitHub repo ID for
+    DataEngAA/Enterprise_Data_Platform).
+  EOT
+  type        = string
+  default     = "1312536466"
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_repo_id))
+    error_message = "github_repo_id must be a numeric GitHub repository ID (digits only)."
+  }
+}
+
 variable "github_oidc_provider_hostname" {
   description = "Hostname of GitHub's OIDC token issuer for GitHub Actions -- a fixed, GitHub-documented value, not account-specific. Used to build both the OIDC provider's own URL (aws_iam_openid_connect_provider.github_actions, main.tf) and the exact condition-key names (\"<this value>:aud\", \"<this value>:sub\") IAM evaluates against GitHub's federated token."
   type        = string

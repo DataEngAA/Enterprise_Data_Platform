@@ -3425,10 +3425,19 @@ resource "aws_iam_openid_connect_provider" "github_actions" {
 #   - aud must equal var.github_actions_oidc_audience exactly
 #     ("sts.amazonaws.com").
 #   - sub must equal ONE of exactly two approved values, both derived from
-#     var.github_repository -- no other repository, ref, environment, pull
-#     request, or tag can ever satisfy this condition:
-#       repo:<github_repository>:ref:refs/heads/main
-#       repo:<github_repository>:environment:<github_actions_environment_name>
+#     local.github_repository_immutable (locals.tf -- itself Terraform-
+#     derived from var.github_repository, var.github_owner_id, and
+#     var.github_repo_id, not a second hand-copied literal) -- no other
+#     repository, ref, environment, pull request, or tag can ever satisfy
+#     this condition:
+#       repo:<github_repository_immutable>:ref:refs/heads/main
+#       repo:<github_repository_immutable>:environment:<github_actions_environment_name>
+#     CORRECTED 2026-08-08 (Slice 2B): these were the legacy, login-name-only
+#     subjects (repo:<github_repository>:...) until a real GitHub Actions run
+#     failed sts:AssumeRoleWithWebIdentity against them -- GitHub's OIDC
+#     issuer now emits the immutable-ID format shown above. See the
+#     condition block below and locals.tf's github_repository_immutable
+#     comment for the full incident and derivation.
 #     StringEquals against a list of values is an OR match against any one
 #     of them -- this is not a wildcard; each of the two strings must match
 #     GitHub's token claim exactly, character for character. Explicitly NOT
@@ -3460,9 +3469,25 @@ data "aws_iam_policy_document" "github_actions_trust" {
     condition {
       test     = "StringEquals"
       variable = "${var.github_oidc_provider_hostname}:sub"
+      # CORRECTED 2026-08-08 (Phase 0 CI/CD Slice 2B, real observed failure):
+      # a real GitHub Actions run failed at
+      # aws-actions/configure-aws-credentials@v4 with "Not authorized to
+      # perform sts:AssumeRoleWithWebIdentity" against the legacy
+      # login-name-only subjects this condition previously used
+      # (repo:${var.github_repository}:...). GitHub's OIDC token issuer now
+      # emits "sub" claims in an immutable-ID format
+      # (repo:<org>@<owner_id>/<repo>@<repo_id>:...) -- local.
+      # github_repository_immutable (locals.tf) is the Terraform-derived
+      # equivalent, built from var.github_repository (org/repo login names,
+      # unchanged, still the single source of truth for those) plus
+      # var.github_owner_id/var.github_repo_id (GitHub's own immutable
+      # numeric IDs for this exact repository). Still StringEquals against a
+      # list of exactly two values -- still no wildcard, no org-wide
+      # pattern, no other repository/ref/environment/pull-request/tag can
+      # ever satisfy this condition.
       values = [
-        "repo:${var.github_repository}:ref:refs/heads/main",
-        "repo:${var.github_repository}:environment:${var.github_actions_environment_name}",
+        "repo:${local.github_repository_immutable}:ref:refs/heads/main",
+        "repo:${local.github_repository_immutable}:environment:${var.github_actions_environment_name}",
       ]
     }
   }
