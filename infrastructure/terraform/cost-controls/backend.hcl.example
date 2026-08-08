@@ -1,0 +1,32 @@
+# Copy this file to backend.hcl and fill in real values. backend.hcl is
+# gitignored and must NEVER be committed.
+#
+# `key` below is the approved cost-controls state key
+# (10_Cost_and_FinOps/Cost_Controls.md Section 10):
+#   cost-controls/terraform.tfstate
+# This lives inside the SAME state bucket bootstrap already created and
+# hardened -- no new bucket. Its lock object (native S3 locking) is
+# cost-controls/terraform.tfstate.tflock -- never manually created, deleted,
+# or manipulated, same rule as every other state key in this project
+# (bootstrap/README.md "State Safety").
+#
+# The nested assume_role block below is REQUIRED, matching
+# kms-secrets/backend.hcl.example and environments/dev/backend.hcl.example
+# -- unlike logging/backend.hcl.example, which deliberately omits it
+# (human-direct auth). This block governs only how Terraform's STATE
+# STORAGE calls (reading/writing cost-controls/terraform.tfstate,
+# acquiring/releasing its native lock) authenticate -- it has no effect on
+# how Terraform authenticates the resource-management API calls made
+# during plan/apply, which are governed entirely by providers.tf's own,
+# separate assume_role block.
+
+bucket       = "<STATE_BUCKET_NAME>" # same bucket bootstrap created -- see infrastructure/terraform/bootstrap's state_bucket_name output
+key          = "cost-controls/terraform.tfstate"
+region       = "ap-south-1"
+encrypt      = true
+use_lockfile = true
+
+assume_role = {
+  role_arn     = "<DEPLOYMENT_ROLE_ARN>"
+  session_name = "terraform-cost-controls-backend"
+}

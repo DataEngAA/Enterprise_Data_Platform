@@ -1,0 +1,19 @@
+# Copy this file to terraform.tfvars and fill in real values. terraform.tfvars
+# is gitignored and must NEVER be committed.
+#
+# Requires bootstrap/main.tf's new deployment_shared_kms_secrets_permissions
+# policy to already be applied (the deployment role's permissions policy)
+# before this configuration's provider/backend can do anything useful with
+# deployment_role_arn below -- see README.md.
+#
+# No real account ID or ARN is set here -- placeholders only.
+
+aws_account_id      = "<AWS_ACCOUNT_ID>"      # obtain with: aws sts get-caller-identity --query Account --output text
+deployment_role_arn = "<DEPLOYMENT_ROLE_ARN>" # output of infrastructure/terraform/bootstrap's deployment_role_arn
+
+# project_name, environment, owner, cost_center, data_classification, and
+# demo_data_classification all already default to the approved, finalized
+# values in variables.tf -- override here only for a deliberate, reviewed
+# change.
+
+# additional_tags = {}

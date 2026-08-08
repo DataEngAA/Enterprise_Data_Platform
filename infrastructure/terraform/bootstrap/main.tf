@@ -15,6 +15,11 @@
 # =============================================================================
 
 resource "aws_s3_bucket" "terraform_state" {
+  #checkov:skip=CKV_AWS_18:No access-logging destination bucket exists yet -- reviewed and accepted as Trivy AWS-0089 (LOW) during the original Terraform Bootstrap validation gate (Bootstrap_Checklist.md); a correct implementation needs its own hardened bucket, IAM, and retention policy. Checkov triage CKV_AWS_18 (B).
+  #checkov:skip=CKV2_AWS_62:Event notifications never part of the Bootstrap design's threat model; only the deployment role and the human bootstrap identity can write to this bucket (least-privilege IAM), bounding the realistic threat surface. Genuinely new design work, not yet scoped. Checkov triage CKV2_AWS_62 (D -- deferred hardening, not an accepted trade-off).
+  #checkov:skip=CKV_AWS_144:Cross-region replication explicitly, textually "deliberately NOT created" per this file's own "Items Deliberately Out of Scope" comment -- single-region, personal-portfolio project with no DR requirement in PROJECT_BLUEPRINT.md Phase 0. Checkov triage CKV_AWS_144 (B).
+  #checkov:skip=CKV2_AWS_61:Lifecycle expiration for old state-object versions is explicitly, textually "deliberately NOT created" per this file's own comment -- unlike replication, a real low-cost fix exists (a lifecycle rule on noncurrent versions) and is a genuine future improvement candidate, not a settled trade-off. Checkov triage CKV2_AWS_61 (D -- deferred hardening).
+  #checkov:skip=CKV_AWS_145:SSE-S3 (AES256) is an explicit Terraform_Bootstrap_Design.md Section 9 decision, reviewed and accepted as Trivy AWS-0132 (HIGH) during the original validation gate. Checkov triage CKV_AWS_145 (B).
   bucket = var.state_bucket_name
 
   # Blocks Terraform-initiated destruction of the state bucket (`terraform
@@ -124,12 +129,33 @@ resource "aws_s3_bucket_policy" "terraform_state" {
 # (Terraform_Bootstrap_Design.md Sections 21-23)
 # =============================================================================
 
-# Trust policy: limited to the human bootstrap principal only, with an MFA
-# condition. The future EC2 workstation role is deliberately NOT trusted
-# here -- it does not exist yet. Adding it is a separate, later, reviewed
-# change to this same resource once that role has been created
+# Trust policy: two separate, independent statements -- kept as two
+# statements deliberately, not merged into one multi-principal statement,
+# because they require different conditions and it must remain obvious on
+# inspection (of source or of the deployed policy JSON) which principal
+# needs MFA and which does not.
+#
+#   1. AllowHumanBootstrapPrincipalAssumeRoleWithMFA -- the human bootstrap
+#      IAM user (var.human_bootstrap_principal_arn), gated on an active MFA
+#      session. UNCHANGED by Bootstrap Update 2 below.
+#   2. AllowDevWorkstationRoleAssumeRoleNoMfa -- BOOTSTRAP UPDATE 2 (added).
+#      The environments/dev EC2 workstation IAM role
+#      (local.dev_workstation_role_arn, Terraform-derived from
+#      var.aws_account_id + var.dev_workstation_role_name -- the exact role
+#      ARN, never a wildcard or account-root principal), with NO MFA
+#      condition. An IAM role assumed by an EC2 instance profile has no
+#      mechanism to present an MFA token when it in turn calls
+#      sts:AssumeRole -- aws:MultiFactorAuthPresent would always evaluate
+#      false for this principal, so requiring it here would make this path
+#      permanently unusable, not merely inconvenient. This asymmetry is
+#      deliberate and does not weaken the human path above: the two
+#      statements are independent Allow grants to two different, exact
+#      principals, and removing or loosening one has no effect on the
+#      other's own condition.
+#
 # (Terraform_Bootstrap_Design.md Section 2 step 5, Section 22;
-# Terraform_Bootstrap_Implementation_Plan.md Section 16).
+# Terraform_Bootstrap_Implementation_Plan.md Section 16;
+# Dev_Environment_Terraform_Implementation_Plan.md "IAM Sequencing" Stage C.)
 data "aws_iam_policy_document" "deployment_role_trust" {
   statement {
     sid    = "AllowHumanBootstrapPrincipalAssumeRoleWithMFA"
@@ -148,11 +174,113 @@ data "aws_iam_policy_document" "deployment_role_trust" {
       values   = ["true"]
     }
   }
+
+  statement {
+    sid    = "AllowDevWorkstationRoleAssumeRoleNoMfa"
+    effect = "Allow"
+
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "AWS"
+      identifiers = [local.dev_workstation_role_arn]
+    }
+
+    # Deliberately no MFA (or any other) condition here -- see the comment
+    # block above this data source for why an EC2-instance-profile-assumed
+    # role cannot supply one. This statement is scoped to the exact
+    # workstation role ARN only; it does not grant account-root or
+    # wildcard trust, and it does not alter the human-principal statement's
+    # own MFA requirement above.
+  }
+
+  # Added 2026-08-07 -- Phase 0 CI/CD Foundation implementation slice 1
+  # (GitHub OIDC trust only; 02_Infrastructure/CI_CD.md, ADR-0006-cicd-
+  # foundation.md). ADDITIVE ONLY: the two statements above are completely
+  # unchanged -- the human-MFA requirement and the workstation no-MFA
+  # statement's own exact-ARN scoping are neither weakened nor touched by
+  # this addition.
+  #
+  # Third, independent trusted principal: the new, near-empty external
+  # GitHub Actions workload-identity role defined later in this file. This
+  # is a direct AWS-principal AssumeRole trust, NOT the GitHub OIDC trust
+  # itself -- GitHub's own token never reaches this role. GitHub Actions
+  # authenticates to aws_iam_role.github_actions via
+  # aws_iam_openid_connect_provider.github_actions/data.aws_iam_policy_
+  # document.github_actions_trust (below), then that already-authenticated
+  # role makes this SECOND, separate sts:AssumeRole call to reach this role
+  # -- the two-hop chain 02_Infrastructure/CI_CD.md Section 2/4 designed
+  # specifically so this deployment role's own trust policy never has to
+  # reason about GitHub's OIDC claims directly.
+  #
+  # CORRECTED 2026-08-07 (real terraform plan review, dependency-
+  # propagation fix): identifiers below uses local.github_actions_role_arn
+  # (a deterministic string computed from var.aws_account_id and
+  # var.github_actions_role_name, locals.tf), not the resource reference
+  # aws_iam_role.github_actions.arn. Byte-identical value once applied --
+  # this is the same exact ARN aws_iam_role.github_actions will have --
+  # but using the resource reference here made aws_iam_role.deployment
+  # depend on aws_iam_role.github_actions's creation, which in turn made
+  # every OTHER document referencing aws_iam_role.deployment.arn
+  # elsewhere in this file (including the pre-existing, otherwise-
+  # untouched deployment_dev_runtime_iam_permissions guardrail) report a
+  # real, unwanted known-after-apply plan diff. See locals.tf's comment
+  # above deployment_role_arn/github_actions_role_arn for the full root-
+  # cause record.
+  statement {
+    sid    = "AllowGitHubActionsRoleAssumeRoleNoMfa"
+    effect = "Allow"
+
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "AWS"
+      identifiers = [local.github_actions_role_arn]
+    }
+
+    # Deliberately no MFA (or any other) condition here, for the same
+    # reason as the workstation-role statement above: a role reached via
+    # sts:AssumeRoleWithWebIdentity (GitHub OIDC) cannot supply
+    # aws:MultiFactorAuthPresent, so requiring it would make this path
+    # permanently unusable. This statement is scoped to the exact GitHub
+    # Actions role ARN only -- not a wildcard, not account-root, not any
+    # other AWS-principal type. The GitHub-repository/branch/environment
+    # restriction itself lives one hop earlier, on
+    # aws_iam_role.github_actions's own trust policy (this deployment
+    # role's trust policy does not, and does not need to, re-check GitHub's
+    # OIDC claims -- it only ever sees "the already-authenticated GitHub
+    # Actions role is asking to assume this role," exactly as it already
+    # only ever sees "the already-authenticated workstation role is asking
+    # to assume this role" for the statement above).
+  }
 }
 
+# Deployment role description -- kept short deliberately (IAM hard-limits a
+# role's description to 1,000 characters; a prior, longer narrative value
+# here caused a real terraform plan/apply failure -- see
+# PROJECT_EXECUTION_JOURNAL.md for that incident). The detailed explanation
+# previously carried in the description itself is preserved here as a
+# comment instead:
+#
+# Three dev-scoped managed permissions policies are attached (see
+# aws_iam_policy.deployment_dev_permissions,
+# aws_iam_policy.deployment_dev_networking_permissions, and
+# aws_iam_policy.deployment_dev_workstation_iam_permissions, and the
+# comment block below this resource) -- split across three policies as of
+# the 2026-07-26 IAM managed-policy size-quota corrections (Bootstrap
+# Update 1: first a two-policy split after a real iam:CreatePolicyVersion
+# LimitExceeded failure, then a second split of the non-networking policy
+# after its own lifecycle.precondition reported 6212 characters against a
+# 6144 quota). Trust now covers two independent principals (Bootstrap
+# Update 2): the bootstrap-scoped human identity, MFA required, unchanged;
+# and the environments/dev EC2 workstation role
+# (local.dev_workstation_role_arn), no MFA condition (not obtainable from
+# an instance-profile-assumed role) -- see
+# data.aws_iam_policy_document.deployment_role_trust above for both
+# statements.
 resource "aws_iam_role" "deployment" {
   name                 = var.deployment_role_name
-  description          = "Terraform deployment role for ${var.project_name}. Three dev-scoped managed permissions policies are attached (see aws_iam_policy.deployment_dev_permissions, aws_iam_policy.deployment_dev_networking_permissions, and aws_iam_policy.deployment_dev_workstation_iam_permissions, and the comment block below this resource) -- split across three policies as of the 2026-07-26 IAM managed-policy size-quota corrections (Bootstrap Update 1: first a two-policy split after a real iam:CreatePolicyVersion LimitExceeded failure, then a second split of the non-networking policy after its own lifecycle.precondition reported 6212 characters against a 6144 quota). Trust remains limited to the bootstrap-scoped human identity, with MFA required, only -- it has not been extended to the EC2 workstation role yet; that trust addition is Bootstrap Update 2, a separate, later, reviewed change to this same resource's trust policy once the workstation role exists."
+  description          = "Terraform deployment role for ${var.project_name}."
   assume_role_policy   = data.aws_iam_policy_document.deployment_role_trust.json
   max_session_duration = var.deployment_role_max_session_duration
 
@@ -402,6 +530,92 @@ data "aws_iam_policy_document" "deployment_dev_permissions" {
     resources = ["${aws_s3_bucket.terraform_state.arn}/dev/terraform.tfstate.tflock"]
   }
 
+  # --- kms-secrets Terraform state access (ADDED 2026-08-07) ---------------
+  # Real regression: the new infrastructure/terraform/kms-secrets/ stack's
+  # backend initialized successfully (backend CONFIGURATION has no
+  # permissions check of its own), but the first real state read failed --
+  # `S3 HeadObject 403 Forbidden` on
+  # s3://enterprise-data-platform-tfstate-732264765658/kms-secrets/terraform.tfstate.
+  # Root cause: this policy's existing state-access statements
+  # (DevStateListBucket/DevStateObjectReadWrite/DevStateLockObjectManage,
+  # immediately above) are scoped, by explicit design, ONLY to the
+  # "dev/terraform.tfstate*" prefix -- kms-secrets/main.tf's own provider
+  # now assumes the deployment role (kms-secrets/providers.tf's departure
+  # from logging/'s human-direct pattern, per ADR-0004 Option 3), but no
+  # statement anywhere in this role's permissions ever granted it access to
+  # the "kms-secrets/terraform.tfstate*" prefix -- an omission, not a
+  # deliberate exclusion (unlike bootstrap/terraform.tfstate itself, which
+  # is deliberately, permanently excluded -- see the comment block above
+  # data.aws_iam_policy_document.deployment_dev_permissions). Fixed by
+  # extending the exact same three-statement pattern used for the dev state
+  # prefix to this one, scoped only to the two exact kms-secrets state
+  # object keys -- no other state prefix (dev/*, bootstrap/*, logging/*) is
+  # touched or broadened by this addition.
+  statement {
+    sid       = "KmsSecretsStateListBucket"
+    effect    = "Allow"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.terraform_state.arn]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values = [
+        "kms-secrets/terraform.tfstate",
+        "kms-secrets/terraform.tfstate.tflock",
+      ]
+    }
+  }
+
+  statement {
+    sid    = "KmsSecretsStateObjectReadWrite"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+    ]
+    # No s3:DeleteObject on the state object itself -- same intentional
+    # omission as DevStateObjectReadWrite above.
+    resources = ["${aws_s3_bucket.terraform_state.arn}/kms-secrets/terraform.tfstate"]
+  }
+
+  statement {
+    sid    = "KmsSecretsStateLockObjectManage"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject", # delete IS needed here -- releasing a native S3 lock removes the lock object, same as DevStateLockObjectManage above.
+    ]
+    resources = ["${aws_s3_bucket.terraform_state.arn}/kms-secrets/terraform.tfstate.tflock"]
+  }
+
+  # --- cost-controls Terraform state access -- MOVED OUT 2026-08-07 --------
+  # A real cost-controls state-access gap (S3 HeadObject 403 on
+  # cost-controls/terraform.tfstate) was first fixed by adding
+  # CostControlsStateListBucket/CostControlsStateObjectReadWrite/
+  # CostControlsStateLockObjectManage directly here, the same shape as the
+  # dev/* and kms-secrets/* statements above. That addition pushed this
+  # policy document's own rendered JSON to 6715 characters against the
+  # 6144-character quota -- caught entirely at plan time by this policy's
+  # own lifecycle.precondition below, NOT by a real iam:CreatePolicyVersion
+  # AWS API call; no AWS command was run and no AWS change occurred.
+  # SPLIT OUT: all three statements moved, unchanged (same Sid, actions,
+  # resources, conditions), into a new, dedicated
+  # data.aws_iam_policy_document.deployment_shared_cost_controls_state_permissions
+  # / aws_iam_policy.deployment_shared_cost_controls_state_permissions
+  # further down this file -- following the exact same "split into an
+  # additional managed policy" precedent this project has already used
+  # three times (the original 26-statement split, the workstation-IAM
+  # split, and now this one). Nothing was merged, dropped, or weakened to
+  # save space. DevStateBucketMetadataRead (s3:GetBucketLocation/
+  # s3:GetBucketVersioning, above) remains bucket-wide, unconditioned, and
+  # still attached to the same shared deployment role -- it continues to
+  # cover the cost-controls backend's need for these two actions with no
+  # duplicate statement needed in the new policy, since IAM evaluates the
+  # union of every policy attached to a role, not each policy in
+  # isolation.
+
   # --- Read-only / describe (Section 11.1 row 8) ---------------------------
   # Resource = "*" is unconditional here -- Describe* actions never support
   # resource-level restriction in AWS IAM (Section 11.3 item 2) -- this part
@@ -457,6 +671,32 @@ data "aws_iam_policy_document" "deployment_dev_permissions" {
       "ec2:DescribeTags",
       "ec2:DescribeVolumes",
       "ec2:DescribeAccountAttributes",
+      # ec2:DescribeVpcEndpoints, ec2:DescribeFlowLogs, logs:DescribeLogGroups
+      # ADDED 2026-08-07 (Phase 0 Networking Hardening remaining-resource
+      # authorization gap) -- same category as every other action already in
+      # this statement: unconditional, read-only Describe/inventory actions
+      # that AWS IAM does not support restricting to a specific resource ARN
+      # for. logs:DescribeLogGroups is a CloudWatch Logs action, not EC2, but
+      # is added to this same statement rather than a new one -- it is the
+      # established home in this policy for exactly this category
+      # (unconditional Describe, region-scoped only), and adding a
+      # single-action statement elsewhere for it alone would not change its
+      # behavior or its resource-scoping, only where it's declared.
+      "ec2:DescribeVpcEndpoints",
+      "ec2:DescribeFlowLogs",
+      "logs:DescribeLogGroups",
+      # ec2:DescribePrefixLists ADDED 2026-08-07 (second real Networking
+      # Hardening apply, partial success -- refresh failure). The AWS
+      # provider calls this internally while flattening/reading the S3
+      # Gateway VPC endpoint's prefix-list-based service name
+      # (com.amazonaws.<region>.s3) during a normal `terraform plan`
+      # refresh -- a read-only Describe action, same category as every
+      # other action already in this statement, not a new write
+      # permission. Real evidence: this exact action name, on this exact
+      # endpoint, was reported as the refresh-time AccessDenied by a real
+      # `terraform plan` against the already-created
+      # vpce-0baab9fe0d5815ad8.
+      "ec2:DescribePrefixLists",
     ]
     resources = ["*"]
 
@@ -492,35 +732,53 @@ data "aws_iam_policy_document" "deployment_dev_permissions" {
     # original combined statement's image/* entry.
     resources = ["arn:aws:ec2:${var.aws_region}::image/*"]
 
-    # DIAGNOSTIC CONDITIONS RESTORED (2026-07-26) -- investigation closed.
+    # DIAGNOSTIC CONDITIONS RESTORED (2026-07-26), THEN ec2:InstanceType
+    # REMOVED AGAIN AS A CONFIRMED DEFECT (2026-08-04) -- see below.
+    #
     # A three-round diagnostic sequence (removing ec2:Owner, then
     # ec2:InstanceType, then aws:RequestedRegion, one at a time, on real
-    # applies) was run against a real, unexplained ec2:RunInstances
-    # UnauthorizedOperation on this exact AMI resource. The true root cause
-    # turned out to be unrelated to this statement entirely: Terraform was
-    # not actually operating under the deployment role's assumed-role
-    # session during that testing (an MFA/STS credential-flow issue,
-    # resolved separately -- see PROJECT_EXECUTION_JOURNAL.md for the full
-    # incident record). With a genuine deployment-role session in place, the
-    # bare, condition-free version of this statement authorized the launch
-    # successfully, confirming none of these three conditions was ever the
-    # actual blocker. All three are restored below to their intended,
-    # reviewed scope. ec2:Owner and aws:RequestedRegion are restored exactly
-    # as originally designed. ec2:InstanceType's value list additionally
-    # includes t3.small here, matching the still-active, separately-tracked
-    # temporary account-specific workaround on
-    # DevRunInstancesSupportingResources below and in both
-    # environments/dev/variables.tf and modules/ec2-workstation/variables.tf
-    # -- restoring this condition without t3.small would reintroduce a real
-    # regression against the currently-working deployment if ec2:InstanceType
-    # turns out to be evaluated for this resource type after all, even though
-    # it is not expected to apply to the "image" resource type per AWS's own
-    # EC2 condition-key documentation. Revert to ["t3.medium", "t3.large",
-    # "t3.xlarge"] (no t3.small) together with the identical, separately
-    # tracked t3.small removal on DevRunInstancesSupportingResources and in
-    # both variables.tf files once this account's Free Tier launch
-    # restriction is resolved -- see PROJECT_EXECUTION_JOURNAL.md for the
-    # full incident record and revert conditions.
+    # applies) had been run earlier against a real, unexplained
+    # ec2:RunInstances UnauthorizedOperation on this exact AMI resource. At
+    # that time an MFA/STS credential-flow issue (Terraform not actually
+    # operating under the deployment role's assumed-role session) was
+    # identified and fixed, and all three conditions were restored here on
+    # the belief that the credential issue fully explained the failure. **That
+    # belief was incomplete.** It is NOT accurate to say this investigation
+    # was fully closed at that point, and it is NOT accurate to say
+    # ec2:InstanceType on this AMI-only statement was harmless -- both claims
+    # were removed from this comment on 2026-08-04 (see below).
+    #
+    # REAL EVIDENCE, 2026-08-04: after this statement (with ec2:InstanceType
+    # restored, t3.small included) was deployed to real AWS, a real
+    # `ec2:RunInstances --dry-run` request was executed under the confirmed,
+    # genuine deployment-role session. AWS denied it: `UnauthorizedOperation`
+    # on `arn:aws:ec2:ap-south-1::image/<AMI_ID>`. `--dry-run` creates no
+    # resource, so this test had no side effect. Root cause, confirmed
+    # directly from this statement's own condition, not from a credential
+    # issue this time: `ec2:InstanceType` is an INSTANCE-resource condition
+    # key (it describes the instance type of the instance being launched,
+    # not any property of the AMI it boots from) -- it is not a supported,
+    # populated condition key on the AMI/`image` resource type at all.
+    # During AMI-side authorization, AWS IAM Policy Evaluation treats an
+    # absent condition key under `StringEquals` as a non-match (unlike
+    # `StringEqualsIfExists`, which was deliberately NOT used here -- see the
+    # design note below), so this entire `Allow` statement failed to match
+    # and `RunInstances` was denied on the AMI resource specifically.
+    #
+    # FIX (2026-08-04): the `ec2:InstanceType` condition block is removed
+    # from this AMI-only statement. `ec2:Owner` and `aws:RequestedRegion`
+    # (both genuinely applicable to the AMI resource) are unchanged. The
+    # instance-type restriction remains fully enforced -- it lives on
+    # `DevRunInstancesSupportingResources` below, whose `Resource` is the
+    # `instance/*` type that `ec2:InstanceType` actually applies to. This is
+    # the cleaner least-privilege design: placing a condition key only on the
+    # resource type it is actually defined for, rather than attaching it
+    # everywhere and relying on AWS silently ignoring it where it doesn't
+    # apply -- which is exactly what happened here and caused a real,
+    # deployed authorization failure, not a merely theoretical one.
+    #
+    # Full incident record, including the real `--dry-run` command/output and
+    # this correction: PROJECT_EXECUTION_JOURNAL.md.
     condition {
       test     = "StringEquals"
       variable = "aws:RequestedRegion"
@@ -530,16 +788,6 @@ data "aws_iam_policy_document" "deployment_dev_permissions" {
       test     = "StringEquals"
       variable = "ec2:Owner"
       values   = ["amazon"]
-    }
-    condition {
-      test     = "StringEquals"
-      variable = "ec2:InstanceType"
-      values = [
-        "t3.medium",
-        "t3.large",
-        "t3.xlarge",
-        "t3.small",
-      ]
     }
   }
 
@@ -620,9 +868,9 @@ data "aws_iam_policy_document" "deployment_dev_permissions" {
   }
 
   statement {
-    sid       = "DevRunInstancesTagOnCreate"
-    effect    = "Allow"
-    actions   = ["ec2:CreateTags"]
+    sid     = "DevRunInstancesTagOnCreate"
+    effect  = "Allow"
+    actions = ["ec2:CreateTags"]
     resources = [
       "arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:instance/*",
       "arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:volume/*",
@@ -1286,6 +1534,12 @@ data "aws_iam_policy_document" "deployment_dev_networking_permissions" {
         "CreateInternetGateway",
         "CreateRouteTable",
         "CreateSecurityGroup",
+        # CreateVpcEndpoint, CreateFlowLogs ADDED 2026-08-07 (Phase 0
+        # Networking Hardening remaining-resource authorization gap) -- same
+        # tag-on-create pattern as the five original actions above, no
+        # untagged alternative anywhere in this policy.
+        "CreateVpcEndpoint",
+        "CreateFlowLogs",
       ]
     }
     condition {
@@ -1341,6 +1595,29 @@ data "aws_iam_policy_document" "deployment_dev_networking_permissions" {
       values   = ["dev"]
     }
   }
+
+  # -------------------------------------------------------------------------
+  # NOTE (2026-08-07, moved same day): the default-security-group adoption
+  # statement (CKV2_AWS_12 remediation, Sid DevDefaultSecurityGroupAdoptionOnly)
+  # briefly lived here. A real bootstrap `terraform plan` failed this
+  # document's own size-quota precondition (below) once that statement was
+  # added: rendered JSON length 6282 characters against the 6144 AWS
+  # managed-policy quota. Per this project's standing precedent for size-
+  # quota failures (never merge statements or drop conditions to save
+  # space -- split into an additional managed policy instead), that
+  # statement now lives in its own dedicated document/policy/attachment:
+  # data.aws_iam_policy_document.deployment_dev_default_sg_adoption_permissions
+  # / aws_iam_policy.deployment_dev_default_sg_adoption_permissions /
+  # aws_iam_role_policy_attachment.deployment_dev_default_sg_adoption_permissions
+  # (defined later in this file, alongside the other split-out dev
+  # policies). Its content -- Sid, actions, exact SG ARN, single
+  # aws:RequestedRegion condition, deliberate absence of any
+  # aws:ResourceTag condition -- is unchanged from what briefly lived here;
+  # only its containing managed policy changed. Every other statement in
+  # this document (including DevSecurityGroupEgressRulesOnly,
+  # DevTaggingManageTaggedResourceOnly, and everything above) is untouched
+  # by this move.
+  # -------------------------------------------------------------------------
 }
 
 # ---------------------------------------------------------------------------
@@ -1367,6 +1644,49 @@ locals {
   deployment_dev_permissions_json_length                 = length(data.aws_iam_policy_document.deployment_dev_permissions.json)
   deployment_dev_networking_permissions_json_length      = length(data.aws_iam_policy_document.deployment_dev_networking_permissions.json)
   deployment_dev_workstation_iam_permissions_json_length = length(data.aws_iam_policy_document.deployment_dev_workstation_iam_permissions.json)
+
+  # Added for the Phase 0 IAM Foundation permission-boundary task
+  # (2026-08-04) -- same real, Terraform-computed length check, used by the
+  # two new policies' own lifecycle.precondition blocks below.
+  runtime_role_permission_boundary_json_length       = length(data.aws_iam_policy_document.runtime_role_permission_boundary.json)
+  deployment_dev_runtime_iam_permissions_json_length = length(data.aws_iam_policy_document.deployment_dev_runtime_iam_permissions.json)
+
+  # Added for the Phase 0 Networking Hardening remaining-resource
+  # authorization gap task (2026-08-07) -- same real, Terraform-computed
+  # length check, used by the new policy's own lifecycle.precondition below.
+  deployment_dev_networking_observability_permissions_json_length = length(data.aws_iam_policy_document.deployment_dev_networking_observability_permissions.json)
+
+  # Added for the Phase 0 KMS and Secrets Foundation task (2026-08-07) --
+  # same real, Terraform-computed length check, used by the new policy's
+  # own lifecycle.precondition below.
+  deployment_shared_kms_secrets_permissions_json_length = length(data.aws_iam_policy_document.deployment_shared_kms_secrets_permissions.json)
+
+  # Added for the Phase 0 Cost Controls task (2026-08-07) -- same real,
+  # Terraform-computed length check, used by the new policy's own
+  # lifecycle.precondition below.
+  deployment_shared_cost_controls_permissions_json_length = length(data.aws_iam_policy_document.deployment_shared_cost_controls_permissions.json)
+
+  # Added 2026-08-07, in direct response to the real deployment_dev_permissions
+  # size-quota failure (6715 > 6144) caused by the cost-controls state-access
+  # statements -- same real, Terraform-computed length check, used by the
+  # new dedicated state-access policy's own lifecycle.precondition below.
+  deployment_shared_cost_controls_state_permissions_json_length = length(data.aws_iam_policy_document.deployment_shared_cost_controls_state_permissions.json)
+
+  # Added for the Phase 0 CI/CD Foundation implementation slice 1 task
+  # (2026-08-07) -- same real, Terraform-computed length check, used by
+  # aws_iam_policy.github_actions_permissions's own lifecycle.precondition
+  # below. Expected to be far under the 6144 quota (this policy holds
+  # exactly one statement, one action, one resource) -- the precondition is
+  # added anyway, matching every other managed policy in this file, rather
+  # than assumed safe by inspection.
+  github_actions_permissions_json_length = length(data.aws_iam_policy_document.github_actions_permissions.json)
+
+  # Added 2026-08-07, in direct response to the real
+  # deployment_dev_networking_permissions size-quota failure (6282 > 6144)
+  # caused by the CKV2_AWS_12 default-security-group adoption statement --
+  # same real, Terraform-computed length check, used by the new dedicated
+  # policy's own lifecycle.precondition below.
+  deployment_dev_default_sg_adoption_permissions_json_length = length(data.aws_iam_policy_document.deployment_dev_default_sg_adoption_permissions.json)
 }
 
 resource "aws_iam_policy" "deployment_dev_permissions" {
@@ -1513,11 +1833,1717 @@ resource "aws_iam_role_policy_attachment" "deployment_dev_workstation_iam_permis
 }
 
 # ---------------------------------------------------------------------------
-# Bootstrap Update 2 (Stage C, Dev_Environment_Terraform_Implementation_
-# Plan.md Section 12) is NOT implemented by this update -- it is a
-# TRUST-POLICY-ONLY change (adding the, by-then-real, workstation role ARN
-# as a second trusted principal on aws_iam_role.deployment's trust policy
-# above), strictly deferred until AFTER environments/dev's own apply
-# produces that real ARN. This section will be added as its own, separate,
-# later, reviewed change -- not part of this file-creation task.
+# Default security group adoption (CKV2_AWS_12 remediation) -- SPLIT OUT
+# 2026-08-07 into this fourth, separate, dedicated managed policy, purely to
+# stay under AWS's per-policy size quota. A real bootstrap terraform plan
+# reported deployment_dev_networking_permissions's own rendered JSON at 6282
+# characters against the 6144-character quota, 138 characters over -- caught
+# entirely by that policy's own lifecycle.precondition at plan time, NOT by
+# a real iam:CreatePolicyVersion AWS API call; no AWS command was run and no
+# AWS change occurred. The single statement below is moved here UNCHANGED
+# (same Sid, actions, resource, condition) from where it previously lived
+# inside deployment_dev_networking_permissions -- nothing was merged,
+# combined, dropped, or weakened to save space, and no aws:ResourceTag
+# condition was added (see the statement's own comment for why one is
+# deliberately absent). Scoped ONLY to the one, real, already-existing
+# default security group for the dev VPC (vpc-0b9e094c41712d68a) -- not
+# security-group/*, not Resource = "*", and not an ec2:Vpc condition.
 # ---------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "deployment_dev_default_sg_adoption_permissions" {
+  statement {
+    sid    = "DevDefaultSecurityGroupAdoptionOnly"
+    effect = "Allow"
+    actions = [
+      "ec2:RevokeSecurityGroupIngress",
+      "ec2:RevokeSecurityGroupEgress",
+      "ec2:CreateTags",
+      "ec2:DeleteTags",
+    ]
+
+    # The one, real, already-existing default security group for the dev
+    # VPC (vpc-0b9e094c41712d68a) -- not a wildcard, not a pattern, the
+    # exact resource ARN and nothing else.
+    resources = ["arn:aws:ec2:ap-south-1:732264765658:security-group/sg-043396862de555680"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+
+    # Deliberately NO aws:ResourceTag/Project or aws:ResourceTag/Environment
+    # condition here: the default security group carries NO tags at all
+    # before this first adoption, so a tag-conditioned statement could never
+    # authorize the very apply that is supposed to be the one setting those
+    # tags. The exact-resource-ARN scoping above is this statement's only
+    # narrowing mechanism, not a tag condition. Every other security-group
+    # statement in deployment_dev_networking_permissions keeps its own
+    # tag-conditioned or create-time-tagged protection exactly as before --
+    # this statement adds no reach into any other security group, default
+    # or otherwise, anywhere in this account.
+  }
+}
+
+resource "aws_iam_policy" "deployment_dev_default_sg_adoption_permissions" {
+  name        = "${var.project_name}-dev-default-sg-adoption-policy"
+  description = "Default security group adoption (CKV2_AWS_12) for the Enterprise Data Platform dev VPC."
+  policy      = data.aws_iam_policy_document.deployment_dev_default_sg_adoption_permissions.json
+
+  lifecycle {
+    # Same rationale as every other managed policy in this file: description
+    # is immutable (Forces new resource) in the AWS provider. Ignored
+    # pre-emptively here, as a new resource.
+    ignore_changes = [description]
+
+    precondition {
+      condition     = local.deployment_dev_default_sg_adoption_permissions_json_length <= local.iam_managed_policy_size_quota
+      error_message = "aws_iam_policy.deployment_dev_default_sg_adoption_permissions's rendered JSON (${local.deployment_dev_default_sg_adoption_permissions_json_length} characters) exceeds AWS's managed-policy size quota (${local.iam_managed_policy_size_quota} characters). Do not respond by merging statements or dropping tag/condition enforcement to save space -- split further into an additional managed policy, reviewed separately."
+    }
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "deployment_dev_default_sg_adoption_permissions" {
+  role       = aws_iam_role.deployment.name
+  policy_arn = aws_iam_policy.deployment_dev_default_sg_adoption_permissions.arn
+}
+
+# ---------------------------------------------------------------------------
+# Phase 0 IAM Foundation -- Permission Boundary + Runtime-Role Lifecycle
+# (2026-08-04). First approved Terraform implementation task from
+# 02_Infrastructure/IAM_and_Access.md ("Permission Boundary -- Version 1
+# Specification" and "Runtime-Role Lifecycle -- Version 1") and
+# 01_Architecture/ADRs/ADR-0001-iam-foundation-permission-boundaries-and-
+# runtime-role-pattern.md. Design only prior to this task -- nothing below
+# implements Lambda, Step Functions, SQS, EventBridge, S3 zones, DynamoDB
+# tables, Glue, ECS, KMS, Secrets Manager, modules/iam-runtime-role, or any
+# runtime/read-only/OIDC role. This adds exactly two new managed policies
+# (the boundary itself, and the deployment role's narrowly scoped ability to
+# create/manage boundary-protected runtime roles) plus one new attachment --
+# nothing else. No existing resource, policy document, or attachment above
+# this block is modified.
+#
+# Runtime-role name/ARN pattern (approved, IAM_and_Access.md "4. Approved
+# runtime-role ARN and name pattern"): a required "runtime-" segment,
+# structurally distinct from the workstation role's own name
+# (var.dev_workstation_role_name, "...-workstation-role") and the deployment
+# role's own name (var.deployment_role_name, "...-shared-deployment-role"),
+# so no wildcard below can ever match either protected role.
+# ---------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "runtime_role_permission_boundary" {
+  # --- Baseline platform permissions (the ceiling; each runtime role's own
+  #     identity policy still narrows this further to only what it uses).
+  #     Scope: Lambda, Step Functions, SQS, EventBridge, the three standard
+  #     S3 ingestion zones, and DynamoDB pipeline metadata only -- the exact
+  #     v1 runtime scope approved in IAM_and_Access.md "2. Initial runtime
+  #     scope", derived from PROJECT_BLUEPRINT.md's Phase 1 Source 1/2
+  #     patterns and shared build steps. Glue, ECS/Fargate, Kinesis, and DMS
+  #     are deliberately NOT included -- a later, separate boundary revision
+  #     when each is actually adopted, not now. ---
+
+  statement {
+    sid    = "AllowBaselineCloudWatchLogs"
+    effect = "Allow"
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+    ]
+    resources = ["arn:aws:logs:${var.aws_region}:${var.aws_account_id}:log-group:/${var.project_name}/dev/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+  }
+
+  statement {
+    sid    = "AllowBaselineSqsDlqAccess"
+    effect = "Allow"
+    actions = [
+      "sqs:SendMessage",
+      "sqs:ReceiveMessage",
+      "sqs:DeleteMessage",
+      "sqs:GetQueueAttributes",
+    ]
+    resources = ["arn:aws:sqs:${var.aws_region}:${var.aws_account_id}:${var.project_name}-dev-*"]
+  }
+
+  statement {
+    sid       = "AllowBaselineEventBridgePutEvents"
+    effect    = "Allow"
+    actions   = ["events:PutEvents"]
+    resources = ["arn:aws:events:${var.aws_region}:${var.aws_account_id}:event-bus/${var.project_name}-dev-*"]
+  }
+
+  statement {
+    sid    = "AllowBaselineStepFunctionsExecution"
+    effect = "Allow"
+    actions = [
+      "states:StartExecution",
+      "states:DescribeExecution",
+    ]
+    resources = [
+      "arn:aws:states:${var.aws_region}:${var.aws_account_id}:stateMachine:${var.project_name}-dev-*",
+      "arn:aws:states:${var.aws_region}:${var.aws_account_id}:execution:${var.project_name}-dev-*:*",
+    ]
+  }
+
+  statement {
+    sid    = "AllowBaselineS3IngestionZones"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+    ]
+    resources = [
+      "arn:aws:s3:::${var.project_name}-dev-landing/*",
+      "arn:aws:s3:::${var.project_name}-dev-quarantine/*",
+      "arn:aws:s3:::${var.project_name}-dev-audit/*",
+    ]
+  }
+
+  statement {
+    sid     = "AllowBaselineS3IngestionZonesListBucket"
+    effect  = "Allow"
+    actions = ["s3:ListBucket"]
+    resources = [
+      "arn:aws:s3:::${var.project_name}-dev-landing",
+      "arn:aws:s3:::${var.project_name}-dev-quarantine",
+      "arn:aws:s3:::${var.project_name}-dev-audit",
+    ]
+  }
+
+  statement {
+    sid    = "AllowBaselineDynamoDbPipelineMetadata"
+    effect = "Allow"
+    actions = [
+      "dynamodb:PutItem",
+      "dynamodb:GetItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:Query",
+    ]
+    resources = ["arn:aws:dynamodb:${var.aws_region}:${var.aws_account_id}:table/${var.project_name}-dev-pipeline-*"]
+  }
+
+  # --- Always-prohibited actions (explicit Deny, defense-in-depth against a
+  #     future mistake in the allow-list above -- IAM_and_Access.md "1.
+  #     Boundary model"). Resource = "*" throughout: these must never be
+  #     reachable regardless of resource. ---
+
+  statement {
+    sid    = "DenyIamMutatingActions"
+    effect = "Deny"
+    actions = [
+      "iam:CreateUser",
+      "iam:CreateGroup",
+      "iam:CreateRole",
+      "iam:DeleteRole",
+      "iam:CreatePolicy",
+      "iam:DeletePolicy",
+      "iam:CreatePolicyVersion",
+      "iam:SetDefaultPolicyVersion",
+      "iam:AttachRolePolicy",
+      "iam:DetachRolePolicy",
+      "iam:PutRolePolicy",
+      "iam:DeleteRolePolicy",
+      "iam:AttachUserPolicy",
+      "iam:PutUserPolicy",
+      "iam:UpdateAssumeRolePolicy",
+      "iam:PutRolePermissionsBoundary",
+      "iam:DeleteRolePermissionsBoundary",
+      "iam:CreateAccessKey",
+      "iam:UpdateAccessKey",
+      "iam:CreateLoginProfile",
+      "iam:UpdateLoginProfile",
+      "iam:CreateServiceSpecificCredential",
+      "iam:UploadSSHPublicKey",
+      "iam:CreateVirtualMFADevice",
+      "iam:DeactivateMFADevice",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid       = "DenyPassRoleByDefault"
+    effect    = "Deny"
+    actions   = ["iam:PassRole"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "DenyAuditLoggingTampering"
+    effect = "Deny"
+    actions = [
+      "cloudtrail:StopLogging",
+      "cloudtrail:DeleteTrail",
+      "cloudtrail:UpdateTrail",
+      "cloudtrail:PutEventSelectors",
+      "cloudtrail:PutInsightSelectors",
+      "logs:DeleteLogGroup",
+      "logs:DeleteLogStream",
+      "logs:PutRetentionPolicy",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "DenySecurityControlTampering"
+    effect = "Deny"
+    actions = [
+      "guardduty:DeleteDetector",
+      "guardduty:UpdateDetector",
+      "guardduty:DisassociateFromMasterAccount",
+      "securityhub:DisableSecurityHub",
+      "securityhub:UpdateStandardsControl",
+      "config:DeleteConfigRule",
+      "config:StopConfigurationRecorder",
+      "config:DeleteConfigurationRecorder",
+      "config:DeleteDeliveryChannel",
+      "access-analyzer:DeleteAnalyzer",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "DenyKmsAdministration"
+    effect = "Deny"
+    actions = [
+      "kms:CreateKey",
+      "kms:ScheduleKeyDeletion",
+      "kms:DisableKey",
+      "kms:EnableKey",
+      "kms:PutKeyPolicy",
+      "kms:CreateGrant",
+      "kms:RevokeGrant",
+      "kms:CreateAlias",
+      "kms:DeleteAlias",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "DenyOrganizationsAndAccountSettings"
+    effect = "Deny"
+    actions = [
+      "organizations:*",
+      "account:*",
+      "aws-portal:*",
+      "iam:UpdateAccountPasswordPolicy",
+      "iam:CreateAccountAlias",
+      "iam:DeleteAccountAlias",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "DenyKnownEscalationVectors"
+    effect = "Deny"
+    actions = [
+      "glue:CreateDevEndpoint",
+      "glue:UpdateDevEndpoint",
+      "cloudformation:CreateStack",
+      "cloudformation:UpdateStack",
+      "ec2:RunInstances",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_policy" "runtime_role_permission_boundary" {
+  name        = "${var.project_name}-shared-runtime-role-boundary-policy"
+  description = "Permission boundary for Enterprise Data Platform runtime roles."
+  policy      = data.aws_iam_policy_document.runtime_role_permission_boundary.json
+
+  lifecycle {
+    # Same rationale as every other managed policy in this file:
+    # description is immutable (Forces new resource) in the AWS provider.
+    # Ignored pre-emptively here even though this is a new resource, so a
+    # future narrative edit to this field can never force an unplanned
+    # replacement once this policy is live and attached to real roles.
+    ignore_changes = [description]
+
+    precondition {
+      condition     = local.runtime_role_permission_boundary_json_length <= local.iam_managed_policy_size_quota
+      error_message = "aws_iam_policy.runtime_role_permission_boundary's rendered JSON (${local.runtime_role_permission_boundary_json_length} characters) exceeds AWS's managed-policy size quota (${local.iam_managed_policy_size_quota} characters). Do not respond by merging statements or dropping a Deny category to save space -- split into an additional boundary-adjacent policy, reviewed separately."
+    }
+  }
+
+  tags = local.common_tags
+}
+
+# ---------------------------------------------------------------------------
+# Deployment role's new, narrowly scoped runtime-role lifecycle permissions.
+# IAM_and_Access.md "5-6. Lifecycle actions, conditions, and the Version 1
+# statement set" -- five statements, each mapped to exactly one lifecycle
+# operation (create, read/manage/delete, policy attachment, PassRole, and an
+# explicit guardrail deny). iam:PutRolePolicy/DeleteRolePolicy (inline
+# policies) and iam:UpdateAssumeRolePolicy (trust-policy mutation) are
+# DELIBERATELY never granted here -- IAM has no condition key capable of
+# inspecting either an inline policy's content or a new trust document's
+# content, so neither can be safely constrained; a genuine need for either
+# means deleting and recreating the runtime role through the boundary-
+# enforced CreateRole statement below, not an in-place mutation.
+# iam:PutRolePermissionsBoundary/DeleteRolePermissionsBoundary and
+# iam:CreatePolicy/CreatePolicyVersion/SetDefaultPolicyVersion (against the
+# boundary policy's own ARN or any other) are also never granted -- boundary
+# upgrades are a new default version of the SAME policy ARN, applied only by
+# the human bootstrap principal through this file's own reviewed workflow,
+# never a deployment-role-initiated action.
+# ---------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "deployment_dev_runtime_iam_permissions" {
+  statement {
+    sid       = "DevRuntimeRoleCreateTaggedWithBoundary"
+    effect    = "Allow"
+    actions   = ["iam:CreateRole"]
+    resources = ["arn:aws:iam::${var.aws_account_id}:role/${var.project_name}-dev-runtime-*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PermissionsBoundary"
+      values   = [aws_iam_policy.runtime_role_permission_boundary.arn]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Project"
+      values   = [var.project_name]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Environment"
+      values   = ["dev"]
+    }
+  }
+
+  statement {
+    sid    = "DevRuntimeRoleReadManageTaggedOnly"
+    effect = "Allow"
+    actions = [
+      "iam:GetRole",
+      "iam:DeleteRole",
+      "iam:TagRole",
+      "iam:UntagRole",
+      "iam:ListRolePolicies",
+      "iam:ListAttachedRolePolicies",
+    ]
+    resources = ["arn:aws:iam::${var.aws_account_id}:role/${var.project_name}-dev-runtime-*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Project"
+      values   = [var.project_name]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Environment"
+      values   = ["dev"]
+    }
+  }
+
+  statement {
+    sid    = "DevRuntimeRolePolicyAttachApprovedOnly"
+    effect = "Allow"
+    actions = [
+      "iam:AttachRolePolicy",
+      "iam:DetachRolePolicy",
+    ]
+    resources = ["arn:aws:iam::${var.aws_account_id}:role/${var.project_name}-dev-runtime-*"]
+
+    condition {
+      test     = "StringLike"
+      variable = "iam:PolicyARN"
+      values   = ["arn:aws:iam::${var.aws_account_id}:policy/${var.project_name}-*"]
+    }
+  }
+
+  statement {
+    sid       = "DevPassRuntimeRoleToApprovedServicesOnly"
+    effect    = "Allow"
+    actions   = ["iam:PassRole"]
+    resources = ["arn:aws:iam::${var.aws_account_id}:role/${var.project_name}-dev-runtime-*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values = [
+        "lambda.amazonaws.com",
+        "states.amazonaws.com",
+      ]
+    }
+  }
+
+  # Explicit Deny, defense-in-depth: even if the "-dev-runtime-*" resource
+  # pattern above were ever mistakenly widened in a future edit, this
+  # statement independently guarantees none of these actions can ever
+  # target the deployment role or the workstation role -- an IAM Deny
+  # always wins regardless of what any Allow statement (existing or
+  # future) grants. Named by exact ARN, not by pattern.
+  #
+  # CORRECTED 2026-08-04 (real regression found via a real environments/dev
+  # `terraform plan`): this statement originally also denied iam:GetRole,
+  # iam:ListRolePolicies, and iam:ListAttachedRolePolicies -- copied
+  # wholesale from DevRuntimeRoleReadManageTaggedOnly's action list above
+  # without distinguishing read-only discovery actions from actions that
+  # actually carry mutation/escalation risk. Because a Deny always wins
+  # across every policy attached to the deployment role, this silently
+  # overrode DevWorkstationRoleManage's legitimate iam:GetRole/
+  # iam:ListRolePolicies/iam:ListAttachedRolePolicies grant on the
+  # workstation role (deployment_dev_workstation_iam_permissions, above),
+  # breaking ordinary Terraform state refresh with a real
+  # "explicit deny in enterprise-data-platform-dev-runtime-iam-scope-policy"
+  # error on iam:GetRole. Fixed by removing exactly those three read-only
+  # actions -- none of them can create, delete, modify a trust policy,
+  # put/delete an inline policy, attach/detach a managed policy, tag/untag,
+  # change a permissions boundary, or pass the role anywhere. Every action
+  # capable of mutation or escalation remains denied below, unchanged.
+  statement {
+    sid    = "DevRuntimeIamGuardrailDenyProtectedRoles"
+    effect = "Deny"
+    actions = [
+      "iam:CreateRole",
+      "iam:DeleteRole",
+      "iam:UpdateAssumeRolePolicy",
+      "iam:PutRolePolicy",
+      "iam:DeleteRolePolicy",
+      "iam:TagRole",
+      "iam:UntagRole",
+      "iam:AttachRolePolicy",
+      "iam:DetachRolePolicy",
+      "iam:PassRole",
+      "iam:PutRolePermissionsBoundary",
+      "iam:DeleteRolePermissionsBoundary",
+    ]
+    # CORRECTED 2026-08-07 (real terraform plan review, dependency-
+    # propagation fix -- 02_Infrastructure/CI_CD.md, ADR-0006-cicd-
+    # foundation.md; this policy's own statement content and protected-role
+    # set are UNCHANGED, still exactly the deployment role and the dev
+    # workstation role, nothing added or removed): local.deployment_role_arn
+    # replaces the resource reference aws_iam_role.deployment.arn --
+    # byte-identical value, but the resource reference had made this
+    # entirely unrelated, pre-existing policy report an artificial
+    # known-after-apply diff once aws_iam_role.deployment itself gained a
+    # new dependency (the GitHub Actions role trust statement above). See
+    # locals.tf's comment above deployment_role_arn for the full root-cause
+    # record.
+    resources = [
+      local.deployment_role_arn,
+      local.dev_workstation_role_arn,
+    ]
+  }
+}
+
+resource "aws_iam_policy" "deployment_dev_runtime_iam_permissions" {
+  name        = "${var.project_name}-dev-runtime-iam-scope-policy"
+  description = "Runtime-role lifecycle permissions for the Enterprise Data Platform."
+  policy      = data.aws_iam_policy_document.deployment_dev_runtime_iam_permissions.json
+
+  lifecycle {
+    # Same rationale as every other managed policy in this file: description
+    # is immutable (Forces new resource) in the AWS provider. Ignored
+    # pre-emptively here, as a new resource, for the same reason as the
+    # boundary policy above.
+    ignore_changes = [description]
+
+    precondition {
+      condition     = local.deployment_dev_runtime_iam_permissions_json_length <= local.iam_managed_policy_size_quota
+      error_message = "aws_iam_policy.deployment_dev_runtime_iam_permissions's rendered JSON (${local.deployment_dev_runtime_iam_permissions_json_length} characters) exceeds AWS's managed-policy size quota (${local.iam_managed_policy_size_quota} characters). Do not respond by merging statements or dropping tag/condition/guardrail enforcement to save space -- split further into an additional managed policy, reviewed separately."
+    }
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "deployment_dev_runtime_iam_permissions" {
+  role       = aws_iam_role.deployment.name
+  policy_arn = aws_iam_policy.deployment_dev_runtime_iam_permissions.arn
+}
+
+# ---------------------------------------------------------------------------
+# Phase 0 Networking Hardening -- Remaining Resource Authorization Gap
+# (2026-08-07). A real networking apply landed 12 of the original 17 planned
+# resources; the remaining 5 --
+# module.vpc.aws_vpc_endpoint.s3[0], module.vpc.aws_cloudwatch_log_group.
+# vpc_flow_logs[0], module.vpc.aws_iam_role.vpc_flow_logs[0],
+# module.vpc.aws_iam_role_policy.vpc_flow_logs[0], and
+# module.vpc.aws_flow_log.this[0] -- failed with confirmed AccessDenied on
+# ec2:CreateVpcEndpoint, logs:CreateLogGroup, and iam:CreateRole. This adds
+# exactly one new, narrowly scoped managed policy covering the S3 Gateway
+# VPC endpoint, VPC Flow Logs, the Flow Logs CloudWatch Logs log group, and
+# the Flow Logs delivery IAM role, plus the two small amendments above
+# (DevReadOnlyDescribe, DevTaggingOnApprovedCreateActions) for the three new
+# Describe* actions and two new tag-on-create actions. No existing statement
+# is removed, weakened, or merged. No networking Terraform (modules/vpc,
+# environments/dev) is touched by this change; no AWS resource is created or
+# modified.
+#
+# Design choice: a FOURTH policy, not a further split of the three existing
+# ones -- this is a genuinely new permission domain (a new IAM role's own
+# lifecycle, a new CloudWatch Logs log group, VPC-endpoint/Flow-Log
+# lifecycle actions), not an extension of any existing domain, and keeping
+# it separate avoids risking a further size-quota failure on any of the
+# three already-live, already-applied policies (see the "CORRECTED A
+# [FOURTH/FIFTH/SIXTH] TIME" comment blocks above for how costly that
+# failure mode has been in this project's real history).
+# ---------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "deployment_dev_networking_observability_permissions" {
+  # --- S3 Gateway VPC Endpoint (Networking.md Section 4) -------------------
+  # ec2:CreateVpcEndpoint is a multi-resource-type action -- the AWS EC2
+  # Service Authorization Reference lists "vpc-endpoint" (the new resource),
+  # "vpc" (the parent it's created in), and "route-table" (each route table
+  # supplied via route_table_ids) as resource types it authorizes against in
+  # the same call -- the same multi-resource pattern already established and
+  # confirmed for CreateSubnet/CreateRouteTable/CreateSecurityGroup above.
+  # Split the same way: new-resource (aws:RequestTag) plus one
+  # existing-parent (aws:ResourceTag) statement per additional resource type
+  # touched.
+  statement {
+    sid       = "DevCreateVpcEndpointNewResourceTaggedOnly"
+    effect    = "Allow"
+    actions   = ["ec2:CreateVpcEndpoint"]
+    resources = ["arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:vpc-endpoint/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Project"
+      values   = [var.project_name]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Environment"
+      values   = ["dev"]
+    }
+  }
+
+  statement {
+    sid       = "DevCreateVpcEndpointExistingVpcTaggedOnly"
+    effect    = "Allow"
+    actions   = ["ec2:CreateVpcEndpoint"]
+    resources = ["arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:vpc/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Project"
+      values   = [var.project_name]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Environment"
+      values   = ["dev"]
+    }
+  }
+
+  statement {
+    sid       = "DevCreateVpcEndpointExistingRouteTableTaggedOnly"
+    effect    = "Allow"
+    actions   = ["ec2:CreateVpcEndpoint"]
+    resources = ["arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:route-table/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Project"
+      values   = [var.project_name]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Environment"
+      values   = ["dev"]
+    }
+  }
+
+  statement {
+    sid    = "DevVpcEndpointManageDeleteTaggedOnly"
+    effect = "Allow"
+    actions = [
+      "ec2:ModifyVpcEndpoint",
+      "ec2:DeleteVpcEndpoints",
+    ]
+    resources = ["arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:vpc-endpoint/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Project"
+      values   = [var.project_name]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Environment"
+      values   = ["dev"]
+    }
+  }
+
+  # --- VPC Flow Logs (Networking.md Section 5) ------------------------------
+  # ec2:CreateFlowLogs's own resource type, per the AWS EC2 Service
+  # Authorization Reference, is "vpc-flow-log" -- CONFIRMED 2026-08-07 to
+  # also require authorization against the EXISTING SOURCE VPC it monitors,
+  # the same multi-resource pattern already established for CreateSubnet/
+  # CreateRouteTable/CreateSecurityGroup/CreateVpcEndpoint above. This
+  # supersedes the pattern-inferred, not-yet-confirmed note previously here:
+  # a real, final Networking Hardening apply denied ec2:CreateFlowLogs with
+  # AccessDenied evaluated specifically against
+  # arn:aws:ec2:ap-south-1:732264765658:vpc/vpc-0b9e094c41712d68a -- the
+  # deployment role had an Allow for the new vpc-flow-log resource (below)
+  # but none for the existing parent VPC side of the same call. Fixed the
+  # same way every other multi-resource create action in this policy was
+  # fixed: an additional existing-parent-VPC statement, immediately below,
+  # conditioned on aws:ResourceTag (the VPC already carries this project's
+  # tags, having been created via DevCreateVpcTaggedOnly), not a literal VPC
+  # ID -- this bootstrap root module has no Terraform-known reference to
+  # environments/dev's real VPC (separate state, separate root module), and
+  # tag-based scoping is this policy's own established design for every
+  # other existing-parent-VPC statement (DevCreateSubnetExistingVpcTaggedOnly,
+  # DevCreateRouteTableExistingVpcTaggedOnly,
+  # DevCreateSecurityGroupExistingVpcTaggedOnly,
+  # DevCreateVpcEndpointExistingVpcTaggedOnly) -- kept consistent here rather
+  # than introducing a one-off literal-ARN exception.
+  statement {
+    sid       = "DevCreateFlowLogsTaggedOnly"
+    effect    = "Allow"
+    actions   = ["ec2:CreateFlowLogs"]
+    resources = ["arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:vpc-flow-log/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Project"
+      values   = [var.project_name]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Environment"
+      values   = ["dev"]
+    }
+  }
+
+  # The PARENT VPC side of CreateFlowLogs's authorization -- see the comment
+  # block above DevCreateFlowLogsTaggedOnly for the real AccessDenied this
+  # fixes. Only ec2:CreateFlowLogs is granted here -- no other Flow Logs or
+  # VPC action -- and only against a VPC already carrying this project's
+  # Project/Environment tags (aws:ResourceTag), never any VPC unconditionally.
+  statement {
+    sid       = "DevCreateFlowLogsExistingVpcTaggedOnly"
+    effect    = "Allow"
+    actions   = ["ec2:CreateFlowLogs"]
+    resources = ["arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:vpc/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Project"
+      values   = [var.project_name]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Environment"
+      values   = ["dev"]
+    }
+  }
+
+  statement {
+    sid       = "DevDeleteFlowLogsTaggedOnly"
+    effect    = "Allow"
+    actions   = ["ec2:DeleteFlowLogs"]
+    resources = ["arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:vpc-flow-log/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Project"
+      values   = [var.project_name]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Environment"
+      values   = ["dev"]
+    }
+  }
+
+  # --- Flow Logs CloudWatch Logs log group (Logging_and_Audit.md Section 6;
+  #     Networking.md Section 5) -- scoped to the exact log group this
+  #     module creates, /enterprise-data-platform/dev/vpc-flow-logs, not a
+  #     wildcard prefix. logs:DescribeLogGroups is deliberately NOT included
+  #     here -- like EC2's Describe* actions, it does not support
+  #     resource-level restriction in AWS IAM, and is granted (Resource
+  #     "*") alongside the other unconditional Describe actions in
+  #     DevReadOnlyDescribe (deployment_dev_permissions) instead, per the
+  #     amendment above.
+  statement {
+    sid    = "DevVpcFlowLogsLogGroupManage"
+    effect = "Allow"
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:PutRetentionPolicy",
+      "logs:DeleteLogGroup",
+    ]
+    resources = ["arn:aws:logs:${var.aws_region}:${var.aws_account_id}:log-group:/${var.project_name}/dev/vpc-flow-logs:*"]
+  }
+
+  # REVISED 2026-08-07, split out of DevVpcFlowLogsLogGroupManage above
+  # (second real Networking Hardening apply, partial success -- refresh
+  # failure). Root cause of the real logs:ListTagsForResource AccessDenied:
+  # CreateLogGroup/PutRetentionPolicy/DeleteLogGroup use CloudWatch Logs'
+  # own, log-group-specific API operations, whose IAM resource-type ARN
+  # format (per AWS's "Actions, resources, and condition keys for Amazon
+  # CloudWatch Logs" reference) genuinely includes a trailing ":*" --
+  # DevVpcFlowLogsLogGroupManage's resource above is correct for those three
+  # actions. TagResource, UntagResource, and ListTagsForResource are
+  # different: they are CloudWatch Logs' generic, ARN-based resource-tagging
+  # API (introduced after the older, log-group-specific
+  # TagLogGroup/UntagLogGroup/ListTagsLogGroup actions), and the resourceArn
+  # value AWS evaluates the IAM policy against for these three actions is
+  # the BARE log group ARN, with NO trailing ":*" or log-stream suffix of
+  # any kind -- unlike DescribeLogGroups's own "arn" attribute (which does
+  # carry the trailing ":*") and unlike the other three actions above. The
+  # prior single statement's resource ("...:vpc-flow-logs:*") is an IAM
+  # resource pattern requiring a literal trailing colon before the wildcard
+  # -- it does not match a real request-context resourceArn of
+  # "...:vpc-flow-logs" (no trailing colon at all), producing a real,
+  # confirmed AccessDenied on logs:ListTagsForResource even though the
+  # action was already present in this policy's source and this policy was
+  # confirmed attached to the deployment role. The action was never
+  # "missing" from the attached policy -- its resource ARN shape was wrong
+  # for these three specific actions. Fixed by moving TagResource/
+  # UntagResource/ListTagsForResource into their own statement, scoped to
+  # the bare log group ARN (no trailing ":*"). Not broadened to logs:*, and
+  # CreateLogGroup/PutRetentionPolicy/DeleteLogGroup above are unchanged.
+  statement {
+    sid    = "DevVpcFlowLogsLogGroupTagging"
+    effect = "Allow"
+    actions = [
+      "logs:TagResource",
+      "logs:UntagResource",
+      "logs:ListTagsForResource",
+    ]
+    resources = ["arn:aws:logs:${var.aws_region}:${var.aws_account_id}:log-group:/${var.project_name}/dev/vpc-flow-logs"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+  }
+
+  # --- Flow Logs delivery IAM role (Networking.md Section 5) --------------
+  # Treated as a separately governed infrastructure service role -- NOT
+  # folded into deployment_dev_runtime_iam_permissions (scoped to
+  # "-dev-runtime-*" Lambda/Step Functions execution roles) or
+  # deployment_dev_workstation_iam_permissions (scoped only to the
+  # workstation role). Scoped to the SINGLE, EXACT role ARN this module
+  # creates -- no wildcard, no pattern -- the tightest possible restriction,
+  # matching DevWorkstationRoleManage's own precedent above. Exactly the 10
+  # lifecycle actions approved, in the same shape as DevWorkstationRoleManage
+  # (no iam:UpdateAssumeRolePolicy, iam:AttachRolePolicy/DetachRolePolicy,
+  # or iam:PutRolePermissionsBoundary/DeleteRolePermissionsBoundary granted
+  # -- this role's trust policy is fixed at creation, it uses only an inline
+  # policy (aws_iam_role_policy, not a managed-policy attachment) per
+  # modules/vpc/main.tf, and it carries no permission boundary).
+  statement {
+    sid    = "DevVpcFlowLogsRoleManage"
+    effect = "Allow"
+    actions = [
+      "iam:CreateRole",
+      "iam:GetRole",
+      "iam:DeleteRole",
+      "iam:TagRole",
+      "iam:UntagRole",
+      "iam:PutRolePolicy",
+      "iam:GetRolePolicy",
+      "iam:DeleteRolePolicy",
+      "iam:ListRolePolicies",
+      "iam:ListAttachedRolePolicies",
+    ]
+    resources = ["arn:aws:iam::${var.aws_account_id}:role/${var.project_name}-dev-vpc-flow-logs-role"]
+  }
+
+  # iam:PassRole -- REQUIRED: aws_flow_log's iam_role_arn (the CloudWatch
+  # Logs delivery role) is passed by the caller to the VPC Flow Logs service
+  # as part of the same ec2:CreateFlowLogs call; AWS requires iam:PassRole
+  # on that exact role ARN to do so. Restricted to iam:PassedToService =
+  # "vpc-flow-logs.amazonaws.com" -- the exact principal already trusted by
+  # this role's own trust policy (modules/vpc/main.tf,
+  # data.aws_iam_policy_document.vpc_flow_logs_trust) -- so this role can
+  # never be passed to Lambda, EC2, or any other service via this
+  # statement. This statement does not touch or broaden the existing,
+  # separate DevPassWorkstationRoleToEC2Only (ec2.amazonaws.com) or
+  # DevPassRuntimeRoleToApprovedServicesOnly (lambda.amazonaws.com,
+  # states.amazonaws.com) PassRole grants above.
+  statement {
+    sid       = "DevPassVpcFlowLogsRoleToFlowLogsServiceOnly"
+    effect    = "Allow"
+    actions   = ["iam:PassRole"]
+    resources = ["arn:aws:iam::${var.aws_account_id}:role/${var.project_name}-dev-vpc-flow-logs-role"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["vpc-flow-logs.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_policy" "deployment_dev_networking_observability_permissions" {
+  name        = "${var.project_name}-dev-networking-observability-scope-policy"
+  description = "VPC endpoint and Flow Logs observability permissions for the Enterprise Data Platform."
+  policy      = data.aws_iam_policy_document.deployment_dev_networking_observability_permissions.json
+
+  lifecycle {
+    # Same rationale as every other managed policy in this file: description
+    # is immutable (Forces new resource) in the AWS provider. Ignored
+    # pre-emptively here, as a new resource, for the same reason as the
+    # three original split policies and the runtime-role policies above.
+    ignore_changes = [description]
+
+    precondition {
+      condition     = local.deployment_dev_networking_observability_permissions_json_length <= local.iam_managed_policy_size_quota
+      error_message = "aws_iam_policy.deployment_dev_networking_observability_permissions's rendered JSON (${local.deployment_dev_networking_observability_permissions_json_length} characters) exceeds AWS's managed-policy size quota (${local.iam_managed_policy_size_quota} characters). Do not respond by merging statements or dropping tag/condition enforcement to save space -- split further into an additional managed policy, reviewed separately."
+    }
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "deployment_dev_networking_observability_permissions" {
+  role       = aws_iam_role.deployment.name
+  policy_arn = aws_iam_policy.deployment_dev_networking_observability_permissions.arn
+}
+
+# ---------------------------------------------------------------------------
+# Phase 0 KMS and Secrets Foundation (2026-08-07). Implements the approved
+# design (02_Infrastructure/KMS_and_Secrets.md; ADR-0004) -- new, narrowly
+# scoped deployment-role permissions for the new infrastructure/terraform/
+# kms-secrets/ stack (routed through the deployment role, unlike logging/'s
+# human-direct pattern -- see kms-secrets/providers.tf for why). Covers
+# three domains in ONE dedicated managed policy, kept together because each
+# domain's action count is small and they are all part of the same single
+# workstream/stack, unlike the earlier networking-vs-workstation-vs-runtime
+# splits (which existed to solve real, separately-discovered size-quota
+# failures, not as a default pattern to replicate here):
+#
+#   - KMS: key creation (tag-conditioned, Resource "*" -- the key does not
+#     yet exist at authorization time, same category as ec2:CreateVpc
+#     above), key administration (Resource "key/*", tag-conditioned -- KMS
+#     supports this resource-type wildcard, tighter than EC2's bare "*"),
+#     and alias lifecycle (exact, literal alias ARN, known in advance,
+#     unlike the key's own ID). kms:CreateAlias/UpdateAlias are ALSO
+#     granted on the key/* administration statement (in addition to the
+#     alias statement) -- kms:CreateAlias/UpdateAlias are multi-resource
+#     actions requiring authorization against BOTH the alias AND its
+#     target key, the same multi-resource-type pattern this project
+#     already discovered the hard way for ec2:CreateSubnet/
+#     CreateRouteTable/CreateSecurityGroup/CreateVpcEndpoint/CreateFlowLogs
+#     (bootstrap/main.tf's own "CORRECTED" comment history above) --
+#     applied here PROACTIVELY based on that prior, repeated lesson, not
+#     from a fresh, independently re-confirmed AWS KMS reference fetch in
+#     this task (this sandbox's fetch tool returned the KMS Service
+#     Authorization Reference page in a form too large/line-truncated to
+#     reliably extract in this task, the same known limitation already
+#     documented elsewhere in this project's history). kms:DeleteAlias is
+#     granted only on the exact alias ARN (no key-side authorization
+#     documented as required for deletion). NEVER granted:
+#     kms:DisableKey, kms:EnableKey, kms:ScheduleKeyDeletion,
+#     kms:CancelKeyDeletion, kms:DisableKeyRotation, or any kms:*
+#     wildcard -- deliberately absent per KMS_and_Secrets.md Section 2/4;
+#     these remain human/root-only, break-glass actions.
+#   - Secrets Manager: metadata management only (create/describe/update/
+#     delete/tag/untag) for the exact demonstration secret this stack
+#     creates, scoped by its exact name plus Secrets Manager's own
+#     documented ARN convention (a trailing "-*" wildcard for the random
+#     6-character suffix AWS appends to every secret's real ARN -- the
+#     name itself is deterministic, the full ARN is not). NEVER granted:
+#     secretsmanager:GetSecretValue, secretsmanager:PutSecretValue, or any
+#     secretsmanager:* wildcard -- preserves IAM_and_Access.md's
+#     already-approved "deployment role manages the resource, never reads
+#     or writes values" pattern.
+#   - Parameter Store: metadata and value lifecycle for the exact
+#     demonstration parameter this stack creates -- SSM parameter ARNs are
+#     fully deterministic from the parameter name (no random suffix, unlike
+#     Secrets Manager above), so this is scoped to one exact, literal ARN,
+#     no wildcard needed. The demonstration parameter is a plain String,
+#     not SecureString (kms-secrets/main.tf's own documented rationale), so
+#     no KMS-related condition or action is needed here for it.
+#
+# No existing statement in any of the four prior managed policies attached
+# to this role is modified by this addition. No runtime-role permission
+# boundary, protected-role guardrail, PassRole restriction, or logging/
+# networking IAM policy is touched.
+# ---------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "deployment_shared_kms_secrets_permissions" {
+  # --- KMS key creation (Phase 0 KMS and Secrets Foundation) ---------------
+
+  statement {
+    sid       = "DevKmsCreateKeyTaggedOnly"
+    effect    = "Allow"
+    actions   = ["kms:CreateKey"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Project"
+      values   = [var.project_name]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Environment"
+      values   = ["shared"]
+    }
+  }
+
+  # --- KMS key administration -----------------------------------------------
+
+  statement {
+    sid    = "DevKmsKeyManageTaggedOnly"
+    effect = "Allow"
+    actions = [
+      "kms:DescribeKey",
+      "kms:GetKeyPolicy",
+      "kms:PutKeyPolicy",
+      "kms:EnableKeyRotation",
+      "kms:GetKeyRotationStatus",
+      "kms:TagResource",
+      "kms:UntagResource",
+      "kms:ListResourceTags",
+      # kms:CreateAlias/UpdateAlias ALSO granted here (see block comment
+      # above this policy) -- these are multi-resource actions requiring
+      # authorization against the TARGET KEY side of the call, in addition
+      # to the alias-side statement below.
+      "kms:CreateAlias",
+      "kms:UpdateAlias",
+    ]
+    resources = ["arn:aws:kms:${var.aws_region}:${var.aws_account_id}:key/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Project"
+      values   = [var.project_name]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Environment"
+      values   = ["shared"]
+    }
+  }
+
+  # --- KMS alias lifecycle -- exact, literal alias ARN, known in advance ---
+
+  statement {
+    sid    = "DevKmsAliasManageOnly"
+    effect = "Allow"
+    actions = [
+      "kms:CreateAlias",
+      "kms:UpdateAlias",
+      "kms:DeleteAlias",
+    ]
+    resources = ["arn:aws:kms:${var.aws_region}:${var.aws_account_id}:alias/${var.project_name}-shared-primary"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+  }
+
+  # ADDED 2026-08-07 (real, first kms-secrets apply -- partial success):
+  # kms:ListAliases has no resource-level scoping support in AWS IAM -- KMS
+  # exposes no "describe one alias by name" API, so the aws_kms_alias
+  # resource's own Terraform read/refresh has no other mechanism to confirm
+  # the alias exists, same category as ec2:DescribePrefixLists and
+  # logs:DescribeLogGroups elsewhere in this file. Real evidence: a real
+  # `terraform plan`/`apply` denied this exact action while refreshing
+  # alias/enterprise-data-platform-shared-primary. No other KMS read/use
+  # action added alongside this one.
+  statement {
+    sid       = "DevKmsListAliasesUnconditioned"
+    effect    = "Allow"
+    actions   = ["kms:ListAliases"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+  }
+
+  # --- Secrets Manager -- exact demonstration secret, metadata only --------
+
+  statement {
+    sid       = "DevSecretsManagerDemoCreateTaggedOnly"
+    effect    = "Allow"
+    actions   = ["secretsmanager:CreateSecret"]
+    resources = ["arn:aws:secretsmanager:${var.aws_region}:${var.aws_account_id}:secret:${var.project_name}/dev/demo/ingestion-api-*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Project"
+      values   = [var.project_name]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Environment"
+      values   = ["dev"]
+    }
+  }
+
+  statement {
+    sid    = "DevSecretsManagerDemoManage"
+    effect = "Allow"
+    actions = [
+      "secretsmanager:DescribeSecret",
+      "secretsmanager:UpdateSecret",
+      "secretsmanager:DeleteSecret",
+      "secretsmanager:TagResource",
+      "secretsmanager:UntagResource",
+      # ADDED 2026-08-07 (real, first apply -- CreateSecret succeeded, the
+      # resource entered Creating, then Terraform's own post-create read
+      # was denied). secretsmanager:GetResourcePolicy has no bearing on the
+      # secret's VALUE -- it reads the secret's resource-based access
+      # policy (whether one is attached at all; none is here), which
+      # Terraform's own aws_secretsmanager_secret read/refresh logic checks
+      # as part of a normal read, independent of GetSecretValue. Real
+      # evidence: a real apply denied exactly this action against
+      # arn:aws:secretsmanager:ap-south-1:732264765658:secret:enterprise-
+      # data-platform/dev/demo/ingestion-api-elfizH.
+      "secretsmanager:GetResourcePolicy",
+    ]
+    # Same exact-name-plus-random-suffix-wildcard ARN pattern as the create
+    # statement above -- deliberately NOT secretsmanager:GetSecretValue or
+    # secretsmanager:PutSecretValue (see block comment above this policy).
+    resources = ["arn:aws:secretsmanager:${var.aws_region}:${var.aws_account_id}:secret:${var.project_name}/dev/demo/ingestion-api-*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+  }
+
+  # --- Parameter Store -- exact demonstration parameter, no random suffix --
+
+  statement {
+    sid    = "DevSsmDemoParameterManage"
+    effect = "Allow"
+    actions = [
+      "ssm:PutParameter",
+      "ssm:GetParameter",
+      "ssm:DeleteParameter",
+      "ssm:AddTagsToResource",
+      "ssm:RemoveTagsFromResource",
+      "ssm:ListTagsForResource",
+    ]
+    resources = ["arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/${var.project_name}/dev/demo/ingestion-config"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+  }
+
+  # ADDED 2026-08-07 (real, first kms-secrets apply -- partial success):
+  # ssm:DescribeParameters has no resource-level scoping support in AWS
+  # IAM -- it is an account/region-wide search action, distinct from
+  # ssm:GetParameter above (which reads one specific, already-scoped
+  # parameter's value). Real evidence: a real `terraform plan`/`apply`
+  # denied this exact action while refreshing
+  # /enterprise-data-platform/dev/demo/ingestion-config. Not broadened to
+  # ssm:*.
+  statement {
+    sid       = "DevSsmDescribeParametersUnconditioned"
+    effect    = "Allow"
+    actions   = ["ssm:DescribeParameters"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+  }
+}
+
+resource "aws_iam_policy" "deployment_shared_kms_secrets_permissions" {
+  name        = "${var.project_name}-shared-kms-secrets-scope-policy"
+  description = "KMS, Secrets Manager, and Parameter Store foundation permissions for the Enterprise Data Platform."
+  policy      = data.aws_iam_policy_document.deployment_shared_kms_secrets_permissions.json
+
+  lifecycle {
+    # Same rationale as every other managed policy in this file: description
+    # is immutable (Forces new resource) in the AWS provider. Ignored
+    # pre-emptively here, as a new resource, for the same reason as every
+    # prior policy addition.
+    ignore_changes = [description]
+
+    precondition {
+      condition     = local.deployment_shared_kms_secrets_permissions_json_length <= local.iam_managed_policy_size_quota
+      error_message = "aws_iam_policy.deployment_shared_kms_secrets_permissions's rendered JSON (${local.deployment_shared_kms_secrets_permissions_json_length} characters) exceeds AWS's managed-policy size quota (${local.iam_managed_policy_size_quota} characters). Do not respond by merging statements or dropping tag/condition enforcement to save space -- split further into an additional managed policy, reviewed separately."
+    }
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "deployment_shared_kms_secrets_permissions" {
+  role       = aws_iam_role.deployment.name
+  policy_arn = aws_iam_policy.deployment_shared_kms_secrets_permissions.arn
+}
+
+# ---------------------------------------------------------------------------
+# Phase 0 Cost Controls (2026-08-07). Implements the approved design in
+# 10_Cost_and_FinOps/Cost_Controls.md and
+# 01_Architecture/ADRs/ADR-0005-cost-controls-foundation.md: permissions for
+# the deployment role to manage a new, Terraform-managed AWS Budget
+# (replacing the existing manually created one -- the manual budget is left
+# untouched by this policy and by every other part of this task, per
+# explicit instruction; its retirement is a separate, later, manual step);
+# to create and manage exactly one new EventBridge Scheduler schedule and
+# its exact-ARN-scoped execution IAM role (infrastructure/terraform/
+# environments/dev/main.tf). This is this project's fifth "new domain gets
+# its own dedicated managed policy," following the same precedent as
+# deployment_dev_networking_observability_permissions and
+# deployment_shared_kms_secrets_permissions -- named "shared" because it
+# spans one genuinely shared/account-wide resource (the Budget) and one
+# dev-scoped resource (the shutdown schedule/scheduler role), the same
+# mixed-scope naming precedent already used for
+# deployment_shared_kms_secrets_permissions.
+#
+# CORRECTED 2026-08-07 (real, explicit instruction, before any apply): this
+# policy does NOT grant the deployment role ec2:StopInstances (or any other
+# EC2 action). The deployment role's job here is limited to creating and
+# managing the Scheduler schedule and its dedicated execution role -- it
+# does not need permission to stop the workstation itself merely to do
+# that. ec2:StopInstances lives ONLY on the dedicated EventBridge Scheduler
+# execution role's own policy (environments/dev/main.tf's
+# aws_iam_role_policy.workstation_shutdown_scheduler), scoped to the exact
+# dev workstation instance ARN. See the "EC2 -- deliberately NOT granted
+# here" comment below for the full corrected rationale and the intended
+# trust/permission chain.
+#
+# Explicitly NOT granted anywhere in this policy, per Cost_Controls.md
+# Section 11 and the approved implementation instructions: budgets:*,
+# scheduler:* (only the 7 specific lifecycle/tagging actions below),
+# iam:* (every IAM action below is scoped to exactly one new role's exact
+# ARN), lambda:* (no Lambda function exists in this design at all), ssm:*
+# (no SSM Automation permission exists in this design at all), and (as of
+# this correction) no ec2: action of any kind.
+# ---------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "deployment_shared_cost_controls_permissions" {
+  # --- AWS Budgets -- exact, deterministic budget name ----------------------
+  # AWS Budgets exposes budgets:ViewBudget/budgets:ModifyBudget as the two
+  # actions covering its create/read/update/delete/notification/subscriber
+  # surface -- there is no separate budgets:CreateBudget or
+  # budgets:DeleteBudget action to grant (Cost_Controls.md Section 11). No
+  # aws:RequestedRegion condition here, unlike every EC2/IAM/KMS/Secrets
+  # Manager/SSM statement elsewhere in this file -- AWS Budgets is a global
+  # service; its ARNs carry no region segment (arn:aws:budgets::
+  # <account-id>:budget/<name>, empty region field), so this condition key
+  # would never match and is correctly omitted rather than added merely for
+  # superficial consistency with every other statement.
+  #
+  # CORRECTED 2026-08-07 (real, first cost-controls apply -- CreateBudget
+  # succeeded, then denied on budgets:TagResource against the real budget
+  # ARN arn:aws:budgets::732264765658:budget/enterprise-data-platform-
+  # shared-monthly-budget). This project's original design assumption
+  # ("the budget itself is not directly taggable via aws_budgets_budget,"
+  # Cost_Controls.md Section 4/10, cost-controls/main.tf's own comment) was
+  # technically incomplete: aws_budgets_budget DOES support tags -- via this
+  # provider's own default_tags block (cost-controls/providers.tf), applied
+  # automatically even though no explicit `tags` argument was set on the
+  # resource itself. AWS Budgets' tagging surface uses a separate,
+  # generic-resource-tagging IAM action set (budgets:TagResource/
+  # UntagResource/ListTagsForResource), NOT covered by budgets:ModifyBudget.
+  # Fixed by adding all three tagging actions below -- ListTagsForResource
+  # for Terraform's own post-create/refresh read (same category as
+  # secretsmanager:GetResourcePolicy's addition during KMS and Secrets
+  # Foundation), UntagResource for symmetry with any future tag removal/
+  # drift correction, matching this project's established pattern of
+  # granting the full Tag/Untag/ListTagsForResource lifecycle together
+  # rather than only the one action a single failure exposed. All three
+  # scoped to the exact same budget ARN already used above -- AWS Budgets'
+  # tagging API operates on the same resource ARN as ViewBudget/
+  # ModifyBudget. Not budgets:*.
+  statement {
+    sid    = "CostControlsBudgetsManage"
+    effect = "Allow"
+    actions = [
+      "budgets:ViewBudget",
+      "budgets:ModifyBudget",
+      "budgets:TagResource",
+      "budgets:UntagResource",
+      "budgets:ListTagsForResource",
+    ]
+    resources = ["arn:aws:budgets::${var.aws_account_id}:budget/${var.cost_controls_budget_name}"]
+  }
+
+  # --- EventBridge Scheduler -- exact, deterministic schedule ARN -----------
+  # Scoped to the one schedule this design creates, in the default schedule
+  # group (no dedicated aws_scheduler_schedule_group is created -- one
+  # schedule does not warrant a dedicated group). Not scheduler:* -- only
+  # the specific lifecycle and tagging actions this project's own Terraform
+  # workflow actually calls.
+  statement {
+    sid    = "CostControlsSchedulerManage"
+    effect = "Allow"
+    actions = [
+      "scheduler:CreateSchedule",
+      "scheduler:GetSchedule",
+      "scheduler:UpdateSchedule",
+      "scheduler:DeleteSchedule",
+      "scheduler:TagResource",
+      "scheduler:UntagResource",
+      "scheduler:ListTagsForResource",
+    ]
+    resources = ["arn:aws:scheduler:${var.aws_region}:${var.aws_account_id}:schedule/default/${var.cost_controls_schedule_name}"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+  }
+
+  # --- Scheduler execution role -- exact, deterministic role ARN ------------
+  # Same shape as DevWorkstationRoleManage (workstation-IAM policy above):
+  # full lifecycle management of exactly one new role, by exact ARN, never
+  # a wildcard or naming-pattern match. This grants the deployment role
+  # permission to CREATE the scheduler execution role and write its inline
+  # policy (environments/dev/main.tf) -- it does not itself grant the
+  # deployment role ec2:StopInstances via this statement; that is a
+  # separate, explicit grant below.
+  statement {
+    sid    = "CostControlsSchedulerRoleManage"
+    effect = "Allow"
+    actions = [
+      "iam:CreateRole",
+      "iam:GetRole",
+      "iam:UpdateRole",
+      "iam:UpdateAssumeRolePolicy",
+      "iam:DeleteRole",
+      "iam:TagRole",
+      "iam:UntagRole",
+      "iam:PutRolePolicy",
+      "iam:GetRolePolicy",
+      "iam:DeleteRolePolicy",
+      "iam:ListRolePolicies",
+      "iam:ListAttachedRolePolicies",
+    ]
+    resources = ["arn:aws:iam::${var.aws_account_id}:role/${var.dev_workstation_shutdown_scheduler_role_name}"]
+  }
+
+  statement {
+    sid       = "CostControlsPassSchedulerRoleOnly"
+    effect    = "Allow"
+    actions   = ["iam:PassRole"]
+    resources = ["arn:aws:iam::${var.aws_account_id}:role/${var.dev_workstation_shutdown_scheduler_role_name}"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["scheduler.amazonaws.com"]
+    }
+  }
+
+  # --- EC2 -- deliberately NOT granted here ---------------------------------
+  # CORRECTED 2026-08-07 (real, explicit instruction, before any apply): this
+  # policy previously also granted the deployment role its own
+  # ec2:StopInstances statement against the workstation instance. Removed --
+  # the deployment role's job is to create/manage the EventBridge Scheduler
+  # schedule and its dedicated execution role (the two statement groups
+  # above); it does not itself need to call ec2:StopInstances to do that.
+  # The intended trust/permission chain is: deployment role creates/manages
+  # the schedule and execution role -> the Scheduler service assumes the
+  # dedicated execution role -> that execution role (and ONLY that role)
+  # calls ec2:StopInstances, scoped to the exact dev workstation instance
+  # ARN (environments/dev/main.tf's aws_iam_role_policy.
+  # workstation_shutdown_scheduler). ec2:StartInstances and
+  # ec2:TerminateInstances remain deliberately absent from both this policy
+  # and the execution role's own policy.
+}
+
+resource "aws_iam_policy" "deployment_shared_cost_controls_permissions" {
+  name        = "${var.project_name}-shared-cost-controls-scope-policy"
+  description = "Cost Controls foundation permissions (Budgets, EventBridge Scheduler, workstation shutdown) for the Enterprise Data Platform."
+  policy      = data.aws_iam_policy_document.deployment_shared_cost_controls_permissions.json
+
+  lifecycle {
+    # Same rationale as every other managed policy in this file: description
+    # is immutable (Forces new resource) in the AWS provider. Ignored
+    # pre-emptively here, as a new resource, for the same reason as every
+    # prior policy addition.
+    ignore_changes = [description]
+
+    precondition {
+      condition     = local.deployment_shared_cost_controls_permissions_json_length <= local.iam_managed_policy_size_quota
+      error_message = "aws_iam_policy.deployment_shared_cost_controls_permissions's rendered JSON (${local.deployment_shared_cost_controls_permissions_json_length} characters) exceeds AWS's managed-policy size quota (${local.iam_managed_policy_size_quota} characters). Do not respond by merging statements or dropping tag/condition enforcement to save space -- split further into an additional managed policy, reviewed separately."
+    }
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "deployment_shared_cost_controls_permissions" {
+  role       = aws_iam_role.deployment.name
+  policy_arn = aws_iam_policy.deployment_shared_cost_controls_permissions.arn
+}
+
+# ---------------------------------------------------------------------------
+# cost-controls Terraform state access -- SPLIT OUT 2026-08-07 into this
+# fourth, separate, dedicated managed policy, purely to stay under AWS's
+# per-policy size quota (see the comment block above
+# data.aws_iam_policy_document.deployment_dev_permissions's now-removed
+# CostControlsState* statements for the full incident: a real
+# terraform plan reported deployment_dev_permissions's own rendered JSON at
+# 6715 characters against the 6144-character quota, 571 characters over --
+# caught entirely by that policy's own lifecycle.precondition at plan time,
+# NOT by a real iam:CreatePolicyVersion AWS API call; no AWS command was
+# run and no AWS change occurred). All three statements below are moved
+# here UNCHANGED (same Sid, actions, resources, conditions) from where they
+# previously lived inside deployment_dev_permissions -- nothing was merged,
+# combined, dropped, or weakened to save space. Scoped ONLY to the two
+# exact cost-controls state object keys -- no access to dev/*,
+# kms-secrets/*, bootstrap/*, or any other prefix in this bucket, and no
+# bucket metadata read statement is duplicated here (DevStateBucketMetadataRead,
+# still in deployment_dev_permissions and still attached to the same
+# shared deployment role, already covers it -- IAM evaluates the union of
+# every policy attached to a role, not each policy in isolation).
+# ---------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "deployment_shared_cost_controls_state_permissions" {
+  statement {
+    sid       = "CostControlsStateListBucket"
+    effect    = "Allow"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.terraform_state.arn]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values = [
+        "cost-controls/terraform.tfstate",
+        "cost-controls/terraform.tfstate.tflock",
+      ]
+    }
+  }
+
+  statement {
+    sid    = "CostControlsStateObjectReadWrite"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+    ]
+    # No s3:DeleteObject on the state object itself -- same intentional
+    # omission as DevStateObjectReadWrite/KmsSecretsStateObjectReadWrite.
+    resources = ["${aws_s3_bucket.terraform_state.arn}/cost-controls/terraform.tfstate"]
+  }
+
+  statement {
+    sid    = "CostControlsStateLockObjectManage"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject", # delete IS needed here -- releasing a native S3 lock removes the lock object, same as DevStateLockObjectManage/KmsSecretsStateLockObjectManage.
+    ]
+    resources = ["${aws_s3_bucket.terraform_state.arn}/cost-controls/terraform.tfstate.tflock"]
+  }
+}
+
+resource "aws_iam_policy" "deployment_shared_cost_controls_state_permissions" {
+  name        = "${var.project_name}-shared-cost-controls-state-scope-policy"
+  description = "cost-controls Terraform remote-state access for the Enterprise Data Platform."
+  policy      = data.aws_iam_policy_document.deployment_shared_cost_controls_state_permissions.json
+
+  lifecycle {
+    # Same rationale as every other managed policy in this file: description
+    # is immutable (Forces new resource) in the AWS provider. Ignored
+    # pre-emptively here, as a new resource.
+    ignore_changes = [description]
+
+    precondition {
+      condition     = local.deployment_shared_cost_controls_state_permissions_json_length <= local.iam_managed_policy_size_quota
+      error_message = "aws_iam_policy.deployment_shared_cost_controls_state_permissions's rendered JSON (${local.deployment_shared_cost_controls_state_permissions_json_length} characters) exceeds AWS's managed-policy size quota (${local.iam_managed_policy_size_quota} characters). Do not respond by merging statements or dropping tag/condition enforcement to save space -- split further into an additional managed policy, reviewed separately."
+    }
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "deployment_shared_cost_controls_state_permissions" {
+  role       = aws_iam_role.deployment.name
+  policy_arn = aws_iam_policy.deployment_shared_cost_controls_state_permissions.arn
+}
+
+# ---------------------------------------------------------------------------
+# NOTE (2026-08-07): the comment block that used to live here described
+# Bootstrap Update 2 (the workstation-role trust addition) as "NOT
+# implemented ... deferred." That work is long since complete -- see
+# data.aws_iam_policy_document.deployment_role_trust's
+# AllowDevWorkstationRoleAssumeRoleNoMfa statement above, applied and
+# validated 2026-08-04 (PROJECT_EXECUTION_JOURNAL.md Section 27ai). Left
+# uncorrected until now only because no task touching this file had reason
+# to revisit it; noted here rather than silently deleted, consistent with
+# this project's standing rule against rewriting past documentation without
+# a visible trace.
+# ---------------------------------------------------------------------------
+
+# =============================================================================
+# PHASE 0 CI/CD FOUNDATION -- IMPLEMENTATION SLICE 1: AWS OIDC TRUST ONLY
+# (2026-08-07)
+# =============================================================================
+#
+# Implements ONLY the AWS-side OIDC trust chain approved in
+# 02_Infrastructure/CI_CD.md and 01_Architecture/ADRs/ADR-0006-cicd-
+# foundation.md: the GitHub OIDC identity provider, the dedicated,
+# near-empty enterprise-data-platform-shared-github-actions-role, and the
+# one additive trust statement on the existing deployment role (added to
+# data.aws_iam_policy_document.deployment_role_trust above, not here).
+#
+# Explicitly NOT part of this slice (per the approved scope): no GitHub
+# Actions workflow YAML; no terraform apply has been run; no change to any
+# application/data stack (kms-secrets/, cost-controls/, environments/dev);
+# no change to bootstrap's or logging/'s own authentication behavior (both
+# remain human-direct, unaffected by anything below); no permission beyond
+# a single, exact-resource-scoped sts:AssumeRole grant on the GitHub
+# Actions role.
+#
+# Trust chain this slice establishes (CI_CD.md Section 2):
+#   GitHub OIDC (token.actions.githubusercontent.com)
+#     -> aws_iam_role.github_actions (sts:AssumeRoleWithWebIdentity,
+#        restricted to var.github_repository's exact "sub" claims)
+#     -> aws_iam_role.deployment (sts:AssumeRole, additive trust statement
+#        above -- deployment role's own permissions are UNCHANGED)
+#     -> Terraform-managed resources, via the deployment role's existing,
+#        already-reviewed permission policies (unchanged by this slice)
+#
+# Exact GitHub repository this trust is scoped to: var.github_repository
+# (DataEngAA/Enterprise_Data_Platform, per explicit authorization -- not
+# invented, not a placeholder).
+
+# -----------------------------------------------------------------------
+# The GitHub OIDC identity provider itself -- one, shared, account-level
+# resource (analogous in scope to the state bucket and the deployment role
+# above: not owned by any single environment or stack). client_id_list is
+# the OIDC "audience" GitHub Actions presents when requesting a token for
+# this AWS account (var.github_actions_oidc_audience, fixed AWS-documented
+# value "sts.amazonaws.com" -- not account-specific).
+#
+# CORRECTED 2026-08-07 (real-documentation review, before any Terraform
+# validation was run): an earlier version of this resource included a
+# data "tls_certificate" lookup (a live network fetch of GitHub's own
+# well-known OIDC configuration endpoint at plan/apply time) purely to
+# populate thumbprint_list, on the assumption that argument was still
+# schema-required. Re-checked against current Terraform Registry
+# documentation for hashicorp/aws (this configuration's installed
+# constraint, versions.tf, is >= 6.0.0 -- well past the 5.81.0 release,
+# December 2024, that made this change): thumbprint_list has been OPTIONAL
+# on aws_iam_openid_connect_provider since v5.81.0
+# (github.com/hashicorp/terraform-provider-aws PR #37255, closing issue
+# #35112). AWS's own IAM service validates the OIDC provider's TLS
+# certificate against its own library of trusted root CAs for providers
+# like GitHub's, rather than relying on a caller-supplied thumbprint; when
+# thumbprint_list is omitted, IAM derives it itself. thumbprint_list is
+# therefore deliberately OMITTED below -- not left blank, not populated
+# via any certificate-fetching data source. This removes this
+# configuration's only dependency on a provider other than hashicorp/aws
+# (the hashicorp/tls entry has been removed from versions.tf accordingly).
+# -----------------------------------------------------------------------
+
+resource "aws_iam_openid_connect_provider" "github_actions" {
+  url            = "https://${var.github_oidc_provider_hostname}"
+  client_id_list = [var.github_actions_oidc_audience]
+
+  # thumbprint_list deliberately omitted -- see the correction note above.
+  # Do not reintroduce a hand-copied literal thumbprint or a certificate-
+  # fetching data source without a newly identified, concrete reason.
+
+  tags = local.common_tags
+}
+
+# -----------------------------------------------------------------------
+# Trust policy for the new, dedicated, near-empty GitHub Actions workload-
+# identity role. Trusts ONLY the OIDC provider above, and ONLY via
+# sts:AssumeRoleWithWebIdentity (never plain sts:AssumeRole, which the OIDC
+# provider as a Federated principal cannot call anyway, but the action list
+# is scoped explicitly regardless of what AWS itself would reject).
+#
+# Two conditions, both required, both exact-match (StringEquals -- no
+# StringLike, no wildcard anywhere in this statement):
+#   - aud must equal var.github_actions_oidc_audience exactly
+#     ("sts.amazonaws.com").
+#   - sub must equal ONE of exactly two approved values, both derived from
+#     var.github_repository -- no other repository, ref, environment, pull
+#     request, or tag can ever satisfy this condition:
+#       repo:<github_repository>:ref:refs/heads/main
+#       repo:<github_repository>:environment:<github_actions_environment_name>
+#     StringEquals against a list of values is an OR match against any one
+#     of them -- this is not a wildcard; each of the two strings must match
+#     GitHub's token claim exactly, character for character. Explicitly NOT
+#     trusted, by construction (no statement or condition anywhere in this
+#     policy would match them): wildcard/org-wide repositories
+#     (repo:DataEngAA/*), any-ref patterns (refs/heads/*), pull_request or
+#     pull_request_target event contexts, tag refs, or any GitHub
+#     Environment name other than var.github_actions_environment_name.
+# -----------------------------------------------------------------------
+
+data "aws_iam_policy_document" "github_actions_trust" {
+  statement {
+    sid    = "AllowGitHubActionsOIDCAssumeRoleWebIdentity"
+    effect = "Allow"
+
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github_actions.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${var.github_oidc_provider_hostname}:aud"
+      values   = [var.github_actions_oidc_audience]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${var.github_oidc_provider_hostname}:sub"
+      values = [
+        "repo:${var.github_repository}:ref:refs/heads/main",
+        "repo:${var.github_repository}:environment:${var.github_actions_environment_name}",
+      ]
+    }
+  }
+}
+
+resource "aws_iam_role" "github_actions" {
+  name        = var.github_actions_role_name
+  description = "External GitHub Actions OIDC workload identity for ${var.project_name} -- CI_CD.md."
+
+  assume_role_policy   = data.aws_iam_policy_document.github_actions_trust.json
+  max_session_duration = var.github_actions_role_max_session_duration
+
+  # NOTE: no wrong-account precondition is added here referencing
+  # aws_iam_role.deployment (unlike aws_iam_role.deployment's own
+  # precondition above, which checks var.human_bootstrap_principal_arn's
+  # account). Doing so would create a real Terraform dependency cycle: this
+  # role's own trust policy is independent of the deployment role (it only
+  # depends on aws_iam_openid_connect_provider.github_actions), while
+  # data.aws_iam_policy_document.deployment_role_trust (used by
+  # aws_iam_role.deployment) already depends on THIS role's ARN
+  # (AllowGitHubActionsRoleAssumeRoleNoMfa, above) -- a precondition here
+  # that also referenced aws_iam_role.deployment.arn would make each role
+  # depend on the other, which Terraform cannot resolve. The provider's own
+  # allowed_account_ids check (providers.tf) already fails the whole
+  # configuration if the active credentials' account doesn't match
+  # var.aws_account_id, which is sufficient protection against the same
+  # wrong-account class of mistake without introducing this cycle.
+  tags = local.common_tags
+}
+
+# -----------------------------------------------------------------------
+# Permissions on the GitHub Actions role -- deliberately near-empty
+# (CI_CD.md Section 4, ADR-0006 Option 2). Exactly one statement, one
+# action, one resource: permission to call sts:AssumeRole on the existing
+# deployment role's exact ARN, and nothing else. No administrator access,
+# no iam:*, no sts:* wildcard, no Terraform resource-management permission
+# (s3:*, ec2:*, kms:*, etc.) of any kind is granted here or anywhere else
+# in this policy document -- this role's only capability, once assumed via
+# OIDC, is to make a second, separate AssumeRole call onto the deployment
+# role; every actual infrastructure-management permission continues to
+# live entirely on the deployment role's own, already-reviewed, unchanged
+# policies.
+#
+# CORRECTED 2026-08-07 (real terraform plan review, dependency-propagation
+# fix): resources below uses local.deployment_role_arn, not the resource
+# reference aws_iam_role.deployment.arn -- see locals.tf's comment above
+# deployment_role_arn for the full root-cause record (the same
+# resource-reference-vs-deterministic-local issue as
+# AllowGitHubActionsRoleAssumeRoleNoMfa and
+# DevRuntimeIamGuardrailDenyProtectedRoles above). Byte-identical ARN
+# value; only the dependency edge changes.
+# -----------------------------------------------------------------------
+
+data "aws_iam_policy_document" "github_actions_permissions" {
+  statement {
+    sid    = "AllowAssumeDeploymentRoleOnly"
+    effect = "Allow"
+
+    actions   = ["sts:AssumeRole"]
+    resources = [local.deployment_role_arn]
+  }
+}
+
+resource "aws_iam_policy" "github_actions_permissions" {
+  name        = "${var.github_actions_role_name}-policy"
+  description = "Minimal permission for the GitHub Actions OIDC role: assume the deployment role only. CI_CD.md."
+  policy      = data.aws_iam_policy_document.github_actions_permissions.json
+
+  lifecycle {
+    ignore_changes = [description] # Same ForcesNew/no-update-API reason as every other aws_iam_policy in this file.
+
+    precondition {
+      condition     = local.github_actions_permissions_json_length <= local.iam_managed_policy_size_quota
+      error_message = "aws_iam_policy.github_actions_permissions's rendered JSON (${local.github_actions_permissions_json_length} characters) exceeds AWS's managed-policy size quota (${local.iam_managed_policy_size_quota} characters) -- unexpected for a one-statement policy; investigate before proceeding rather than merging into another policy to save space."
+    }
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "github_actions_permissions" {
+  role       = aws_iam_role.github_actions.name
+  policy_arn = aws_iam_policy.github_actions_permissions.arn
+}
