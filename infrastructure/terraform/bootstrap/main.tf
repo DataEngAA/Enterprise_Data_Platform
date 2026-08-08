@@ -14,12 +14,12 @@
 # (Terraform_Bootstrap_Design.md Sections 5-11, 28.1-28.2)
 # =============================================================================
 
-#checkov:skip=CKV_AWS_18:No access-logging destination bucket exists yet -- reviewed and accepted as Trivy AWS-0089 (LOW) during the original Terraform Bootstrap validation gate (Bootstrap_Checklist.md); a correct implementation needs its own hardened bucket, IAM, and retention policy. Checkov triage CKV_AWS_18 (B).
-#checkov:skip=CKV2_AWS_62:Event notifications never part of the Bootstrap design's threat model; only the deployment role and the human bootstrap identity can write to this bucket (least-privilege IAM), bounding the realistic threat surface. Genuinely new design work, not yet scoped. Checkov triage CKV2_AWS_62 (D -- deferred hardening, not an accepted trade-off).
-#checkov:skip=CKV_AWS_144:Cross-region replication explicitly, textually "deliberately NOT created" per this file's own "Items Deliberately Out of Scope" comment -- single-region, personal-portfolio project with no DR requirement in PROJECT_BLUEPRINT.md Phase 0. Checkov triage CKV_AWS_144 (B).
-#checkov:skip=CKV2_AWS_61:Lifecycle expiration for old state-object versions is explicitly, textually "deliberately NOT created" per this file's own comment -- unlike replication, a real low-cost fix exists (a lifecycle rule on noncurrent versions) and is a genuine future improvement candidate, not a settled trade-off. Checkov triage CKV2_AWS_61 (D -- deferred hardening).
-#checkov:skip=CKV_AWS_145:SSE-S3 (AES256) is an explicit Terraform_Bootstrap_Design.md Section 9 decision, reviewed and accepted as Trivy AWS-0132 (HIGH) during the original validation gate. Checkov triage CKV_AWS_145 (B).
 resource "aws_s3_bucket" "terraform_state" {
+  #checkov:skip=CKV_AWS_18:No access-logging destination bucket exists yet -- reviewed and accepted as Trivy AWS-0089 (LOW) during the original Terraform Bootstrap validation gate (Bootstrap_Checklist.md); a correct implementation needs its own hardened bucket, IAM, and retention policy. Checkov triage CKV_AWS_18 (B).
+  #checkov:skip=CKV2_AWS_62:Event notifications never part of the Bootstrap design's threat model; only the deployment role and the human bootstrap identity can write to this bucket (least-privilege IAM), bounding the realistic threat surface. Genuinely new design work, not yet scoped. Checkov triage CKV2_AWS_62 (D -- deferred hardening, not an accepted trade-off).
+  #checkov:skip=CKV_AWS_144:Cross-region replication explicitly, textually "deliberately NOT created" per this file's own "Items Deliberately Out of Scope" comment -- single-region, personal-portfolio project with no DR requirement in PROJECT_BLUEPRINT.md Phase 0. Checkov triage CKV_AWS_144 (B).
+  #checkov:skip=CKV2_AWS_61:Lifecycle expiration for old state-object versions is explicitly, textually "deliberately NOT created" per this file's own comment -- unlike replication, a real low-cost fix exists (a lifecycle rule on noncurrent versions) and is a genuine future improvement candidate, not a settled trade-off. Checkov triage CKV2_AWS_61 (D -- deferred hardening).
+  #checkov:skip=CKV_AWS_145:SSE-S3 (AES256) is an explicit Terraform_Bootstrap_Design.md Section 9 decision, reviewed and accepted as Trivy AWS-0132 (HIGH) during the original validation gate. Checkov triage CKV_AWS_145 (B).
   bucket = var.state_bucket_name
 
   # Blocks Terraform-initiated destruction of the state bucket (`terraform

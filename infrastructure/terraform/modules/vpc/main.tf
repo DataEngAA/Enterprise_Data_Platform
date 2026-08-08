@@ -56,8 +56,8 @@ locals {
 # VPC
 # ---------------------------------------------------------------------------
 
-#checkov:skip=CKV2_AWS_11:VPC Flow Logs are real, deployed, and ACTIVE (aws_flow_log.this below, confirmed via a real describe-flow-logs-equivalent check and a live CloudWatch log stream -- PROJECT_EXECUTION_JOURNAL.md Section 27ao). Re-verified 2026-08-08: aws_flow_log.this uses count = var.enable_vpc_flow_logs ? 1 : 0 (true by default), a documented Checkov graph-resolution limitation for count-conditional resources on either side of an expected edge. Checkov triage CKV2_AWS_11 (C).
 resource "aws_vpc" "this" {
+  #checkov:skip=CKV2_AWS_11:VPC Flow Logs are real, deployed, and ACTIVE (aws_flow_log.this below, confirmed via a real describe-flow-logs-equivalent check and a live CloudWatch log stream -- PROJECT_EXECUTION_JOURNAL.md Section 27ao). Re-verified 2026-08-08: aws_flow_log.this uses count = var.enable_vpc_flow_logs ? 1 : 0 (true by default), a documented Checkov graph-resolution limitation for count-conditional resources on either side of an expected edge. Checkov triage CKV2_AWS_11 (C).
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
@@ -320,6 +320,8 @@ data "aws_region" "current" {}
 # ---------------------------------------------------------------------------
 
 resource "aws_cloudwatch_log_group" "vpc_flow_logs" {
+  #checkov:skip=CKV_AWS_158:Phase-0 deferred hardening -- not yet protected with the project CMK; correct CMK integration requires explicit CloudWatch Logs/KMS key-policy and IAM design, to be implemented as a separate logging/KMS hardening change, not added solely to satisfy CI.
+  #checkov:skip=CKV_AWS_338:Phase-0 accepted trade-off/deferred hardening -- deliberately uses the existing configurable 30-day retention (var.flow_log_retention_days) documented in this module; 365-day retention is a stronger enterprise target but not required for this Phase-0 dev environment and increases storage cost. Revisit as part of production/multi-environment retention policy.
   count = var.enable_vpc_flow_logs ? 1 : 0
 
   name              = "/${var.project_name}/${var.environment}/vpc-flow-logs"

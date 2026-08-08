@@ -230,6 +230,7 @@ resource "aws_iam_role_policy" "workstation_shutdown_scheduler" {
 }
 
 resource "aws_scheduler_schedule" "workstation_shutdown" {
+  #checkov:skip=CKV_AWS_297:Phase-0 accepted trade-off/deferred hardening -- the target input carries only the exact EC2 workstation instance ID, not secret material; a customer-managed KMS key here would add KMS policy/service-integration complexity without meaningful Phase-0 risk reduction. Revisit if scheduler payloads later carry sensitive data.
   name        = var.cost_controls_schedule_name
   group_name  = "default"
   description = "Automatic shutdown of the dev EC2 workstation -- shutdown only, never automatic startup (Cost_Controls.md Section 5)."

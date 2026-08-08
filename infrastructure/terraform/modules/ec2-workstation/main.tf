@@ -13,8 +13,8 @@
 # database/Docker/Jupyter port opened inbound, regardless of source CIDR.
 # ---------------------------------------------------------------------------
 
-#checkov:skip=CKV_AWS_382:Unrestricted egress is an explicit, revised 2026-07-26 design decision (module README) -- no NAT Gateway/VPC endpoints exist yet to scope egress through (ADR-0003's NAT deferral). Zero-inbound rules (no exception, ever) is this design's primary control. Checkov triage CKV_AWS_382 (B).
 resource "aws_security_group" "workstation" {
+  #checkov:skip=CKV_AWS_382:Unrestricted egress is an explicit, revised 2026-07-26 design decision (module README) -- no NAT Gateway/VPC endpoints exist yet to scope egress through (ADR-0003's NAT deferral). Zero-inbound rules (no exception, ever) is this design's primary control. Checkov triage CKV_AWS_382 (B).
   name        = "${var.project_name}-${var.environment}-workstation-sg"
   description = "Zero-inbound security group for the ${var.environment} development workstation. No ingress rule of any kind. Unrestricted egress (revised 2026-07-26) -- see module README for the documented trade-off."
   vpc_id      = var.vpc_id
@@ -43,10 +43,10 @@ resource "aws_security_group" "workstation" {
 # EC2 instance -- the development workstation itself.
 # ---------------------------------------------------------------------------
 
-#checkov:skip=CKV_AWS_88:Public IP required for outbound internet reachability -- no NAT Gateway exists yet (ADR-0003, deferred); the zero-inbound security group (aws_security_group.workstation above) is the real control preventing exploitation of the public IP's reachability. Checkov triage CKV_AWS_88 (B).
-#checkov:skip=CKV_AWS_126:enable_detailed_monitoring = false is a deliberate cost decision for this single, disposable, manually operated dev workstation, consistent with this project's Cost Controls posture (ADR-0005); CloudTrail/CIS alarms/VPC Flow Logs already provide security-relevant monitoring -- this is a performance-observability setting, not a security control. Checkov triage CKV_AWS_126 (B).
-#checkov:skip=CKV_AWS_135:ebs_optimized = true was added and then reverted after a real terraform plan against environments/dev proved it forces replacement of this real, existing dev workstation (2 to add, 2 to change, 1 to destroy) -- the real instance's ebs_optimized value is false, and the argument is ForceNew in the installed AWS provider schema. This project will not replace a functioning workstation solely for static-analysis compliance. Checkov triage CKV_AWS_135, reclassified A -> D 2026-08-07 with full live-evidence record; revisit only during an intentional workstation rebuild/instance-type migration.
 resource "aws_instance" "workstation" {
+  #checkov:skip=CKV_AWS_88:Public IP required for outbound internet reachability -- no NAT Gateway exists yet (ADR-0003, deferred); the zero-inbound security group (aws_security_group.workstation above) is the real control preventing exploitation of the public IP's reachability. Checkov triage CKV_AWS_88 (B).
+  #checkov:skip=CKV_AWS_126:enable_detailed_monitoring = false is a deliberate cost decision for this single, disposable, manually operated dev workstation, consistent with this project's Cost Controls posture (ADR-0005); CloudTrail/CIS alarms/VPC Flow Logs already provide security-relevant monitoring -- this is a performance-observability setting, not a security control. Checkov triage CKV_AWS_126 (B).
+  #checkov:skip=CKV_AWS_135:ebs_optimized = true was added and then reverted after a real terraform plan against environments/dev proved it forces replacement of this real, existing dev workstation (2 to add, 2 to change, 1 to destroy) -- the real instance's ebs_optimized value is false, and the argument is ForceNew in the installed AWS provider schema. This project will not replace a functioning workstation solely for static-analysis compliance. Checkov triage CKV_AWS_135, reclassified A -> D 2026-08-07 with full live-evidence record; revisit only during an intentional workstation rebuild/instance-type migration.
   ami                    = var.ami_id
   instance_type          = var.instance_type
   subnet_id              = var.subnet_id

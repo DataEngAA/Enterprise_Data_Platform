@@ -17,11 +17,11 @@
 # Dedicated CloudTrail audit-log S3 bucket
 # -----------------------------------------------------------------------
 
-#checkov:skip=CKV_AWS_18:No access-logging destination bucket exists yet -- same disposition already accepted for the Terraform state bucket (Trivy AWS-0089, Bootstrap_Checklist.md); a correct implementation needs its own hardened bucket, IAM, and retention policy, deferred to a future monitoring/hardening phase. Checkov triage CKV_AWS_18 (B).
-#checkov:skip=CKV2_AWS_62:Event notifications (EventBridge/SNS on object create/delete) were never part of the Logging design's threat model; only the CloudTrail service principal can write to this bucket today (narrow IAM), bounding the realistic threat surface. Genuinely new design work, not yet scoped. Checkov triage CKV2_AWS_62 (D -- deferred hardening, not an accepted trade-off).
-#checkov:skip=CKV_AWS_144:Cross-region replication explicitly out of scope -- single-region, personal-portfolio project with no DR requirement in PROJECT_BLUEPRINT.md Phase 0; DR belongs to the roadmap's later Phase 9. Checkov triage CKV_AWS_144 (B).
-#checkov:skip=CKV_AWS_145:SSE-S3 (AES256) is an explicit ADR-0002 Option 2 deferral -- CMK migration for logging/storage is a separate, later, explicitly reviewed change now that kms-secrets/ exists in source. Checkov triage CKV_AWS_145 (B).
 resource "aws_s3_bucket" "cloudtrail" {
+  #checkov:skip=CKV_AWS_18:No access-logging destination bucket exists yet -- same disposition already accepted for the Terraform state bucket (Trivy AWS-0089, Bootstrap_Checklist.md); a correct implementation needs its own hardened bucket, IAM, and retention policy, deferred to a future monitoring/hardening phase. Checkov triage CKV_AWS_18 (B).
+  #checkov:skip=CKV2_AWS_62:Event notifications (EventBridge/SNS on object create/delete) were never part of the Logging design's threat model; only the CloudTrail service principal can write to this bucket today (narrow IAM), bounding the realistic threat surface. Genuinely new design work, not yet scoped. Checkov triage CKV2_AWS_62 (D -- deferred hardening, not an accepted trade-off).
+  #checkov:skip=CKV_AWS_144:Cross-region replication explicitly out of scope -- single-region, personal-portfolio project with no DR requirement in PROJECT_BLUEPRINT.md Phase 0; DR belongs to the roadmap's later Phase 9. Checkov triage CKV_AWS_144 (B).
+  #checkov:skip=CKV_AWS_145:SSE-S3 (AES256) is an explicit ADR-0002 Option 2 deferral -- CMK migration for logging/storage is a separate, later, explicitly reviewed change now that kms-secrets/ exists in source. Checkov triage CKV_AWS_145 (B).
   bucket = var.cloudtrail_bucket_name
 
   # Protection against accidental deletion (Logging_and_Audit.md Section 2)
@@ -190,9 +190,9 @@ resource "aws_s3_bucket_policy" "cloudtrail" {
 # CloudWatch Logs integration
 # -----------------------------------------------------------------------
 
-#checkov:skip=CKV_AWS_158:CMK encryption for this log group explicitly deferred to a later, separate migration task (ADR-0002 Option 2) -- CloudWatch Logs already encrypts at rest by default (AWS-managed key). Checkov triage CKV_AWS_158 (B).
-#checkov:skip=CKV_AWS_338:90-day retention is an explicit design choice (Logging_and_Audit.md Section 3) -- this log group is for near-term searchability/alarming, not long-term audit retention; the CloudTrail S3 bucket already retains the same content for 365 days. Checkov triage CKV_AWS_338 (B).
 resource "aws_cloudwatch_log_group" "cloudtrail" {
+  #checkov:skip=CKV_AWS_158:CMK encryption for this log group explicitly deferred to a later, separate migration task (ADR-0002 Option 2) -- CloudWatch Logs already encrypts at rest by default (AWS-managed key). Checkov triage CKV_AWS_158 (B).
+  #checkov:skip=CKV_AWS_338:90-day retention is an explicit design choice (Logging_and_Audit.md Section 3) -- this log group is for near-term searchability/alarming, not long-term audit retention; the CloudTrail S3 bucket already retains the same content for 365 days. Checkov triage CKV_AWS_338 (B).
   name              = local.cloudtrail_log_group_name
   retention_in_days = var.cloudwatch_log_retention_days
 
@@ -263,8 +263,8 @@ resource "aws_iam_role_policy" "cloudtrail_cloudwatch" {
 # CloudTrail trail
 # -----------------------------------------------------------------------
 
-#checkov:skip=CKV_AWS_35:Trail inherits SSE-S3 from the CloudTrail bucket's own encryption configuration -- CMK-encrypted CloudTrail is the same ADR-0002 Option 2 deferral as the log group above, tracked as one future "adopt the CMK for logging" task. Checkov triage CKV_AWS_35 (B). (CKV_AWS_252, the SNS-notification finding on this same resource, is a REAL DEFECT already fixed in source -- NOT skipped.)
 resource "aws_cloudtrail" "this" {
+  #checkov:skip=CKV_AWS_35:Trail inherits SSE-S3 from the CloudTrail bucket's own encryption configuration -- CMK-encrypted CloudTrail is the same ADR-0002 Option 2 deferral as the log group above, tracked as one future "adopt the CMK for logging" task. Checkov triage CKV_AWS_35 (B). (CKV_AWS_252, the SNS-notification finding on this same resource, is a REAL DEFECT already fixed in source -- NOT skipped.)
   name           = local.trail_name
   s3_bucket_name = aws_s3_bucket.cloudtrail.id
 
@@ -329,8 +329,8 @@ resource "aws_cloudtrail" "this" {
 # SNS topic for security-event notifications
 # -----------------------------------------------------------------------
 
-#checkov:skip=CKV_AWS_26:No kms_master_key_id set -- same Phase 0 KMS-deferral pattern as the log group/trail above; this topic carries alert notifications only (metric-filter descriptions, CloudTrail delivery status), not sensitive application data. Checkov triage CKV_AWS_26 (B).
 resource "aws_sns_topic" "security_alerts" {
+  #checkov:skip=CKV_AWS_26:No kms_master_key_id set -- same Phase 0 KMS-deferral pattern as the log group/trail above; this topic carries alert notifications only (metric-filter descriptions, CloudTrail delivery status), not sensitive application data. Checkov triage CKV_AWS_26 (B).
   name = local.sns_topic_name
 
   tags = local.common_tags
