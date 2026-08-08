@@ -1,0 +1,308 @@
+name: Terraform Trusted Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      stack:
+        description: Terraform stack to deploy
+        required: true
+        type: choice
+        options:
+          - kms-secrets
+          - cost-controls
+          - environments/dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-deploy-${{ inputs.stack }}-aws-dev
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Plan (${{ inputs.stack }})
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      TF_IN_AUTOMATION: "true"
+      AWS_REGION: ap-south-1
+      AWS_ACCOUNT_ID: "732264765658"
+      STATE_BUCKET: enterprise-data-platform-tfstate-732264765658
+      DEPLOYMENT_ROLE_ARN: arn:aws:iam::732264765658:role/enterprise-data-platform-shared-deployment-role
+      GITHUB_ACTIONS_ROLE_ARN: arn:aws:iam::732264765658:role/enterprise-data-platform-shared-github-actions-role
+      SECURITY_ALERTS_TOPIC_ARN: arn:aws:sns:ap-south-1:732264765658:enterprise-data-platform-shared-security-alerts
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials with GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-actions-plan-${{ github.run_id }}
+
+      - name: Verify OIDC entry identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_ARN_PREFIX="arn:aws:sts::${AWS_ACCOUNT_ID}:assumed-role/enterprise-data-platform-shared-github-actions-role/"
+          CALLER_ARN="$(aws sts get-caller-identity --query Arn --output text)"
+          echo "Authenticated through the GitHub Actions OIDC entry role."
+          case "${CALLER_ARN}" in
+            "${EXPECTED_ARN_PREFIX}"*) ;;
+            *)
+              echo "Unexpected AWS caller identity."
+              exit 1
+              ;;
+          esac
+
+      - name: Set Terraform working directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ inputs.stack }}" in
+            kms-secrets)
+              echo "TF_WORKING_DIR=infrastructure/terraform/kms-secrets" >> "$GITHUB_ENV"
+              echo "TF_STATE_KEY=kms-secrets/terraform.tfstate" >> "$GITHUB_ENV"
+              echo "TF_BACKEND_SESSION=terraform-kms-secrets-plan-backend" >> "$GITHUB_ENV"
+              ;;
+            cost-controls)
+              echo "TF_WORKING_DIR=infrastructure/terraform/cost-controls" >> "$GITHUB_ENV"
+              echo "TF_STATE_KEY=cost-controls/terraform.tfstate" >> "$GITHUB_ENV"
+              echo "TF_BACKEND_SESSION=terraform-cost-controls-plan-backend" >> "$GITHUB_ENV"
+              ;;
+            environments/dev)
+              echo "TF_WORKING_DIR=infrastructure/terraform/environments/dev" >> "$GITHUB_ENV"
+              echo "TF_STATE_KEY=dev/terraform.tfstate" >> "$GITHUB_ENV"
+              echo "TF_BACKEND_SESSION=terraform-dev-plan-backend" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "Unsupported stack."
+              exit 1
+              ;;
+          esac
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: Generate ephemeral backend configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TF_WORKING_DIR"
+          cat > backend.hcl <<EOF
+          bucket       = "${STATE_BUCKET}"
+          key          = "${TF_STATE_KEY}"
+          region       = "${AWS_REGION}"
+          encrypt      = true
+          use_lockfile = true
+
+          assume_role = {
+            role_arn     = "${DEPLOYMENT_ROLE_ARN}"
+            session_name = "${TF_BACKEND_SESSION}"
+          }
+          EOF
+
+      - name: Generate ephemeral Terraform variables
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TF_WORKING_DIR"
+          cat > terraform.tfvars <<EOF
+          aws_account_id      = "${AWS_ACCOUNT_ID}"
+          deployment_role_arn = "${DEPLOYMENT_ROLE_ARN}"
+          EOF
+
+          if [ "${{ inputs.stack }}" = "cost-controls" ]; then
+            cat >> terraform.tfvars <<EOF
+          sns_topic_arn = "${SECURITY_ALERTS_TOPIC_ARN}"
+          EOF
+          fi
+
+      - name: Terraform format check
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TF_WORKING_DIR"
+          terraform fmt -check -recursive
+
+      - name: Terraform init
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TF_WORKING_DIR"
+          terraform init -input=false -backend-config=backend.hcl
+
+      - name: Terraform validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TF_WORKING_DIR"
+          terraform validate
+
+      - name: Terraform plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TF_WORKING_DIR"
+          terraform plan -input=false -no-color
+
+  apply:
+    name: Apply (${{ inputs.stack }})
+    if: github.ref == 'refs/heads/main'
+    needs: plan
+    runs-on: ubuntu-latest
+
+    environment:
+      name: aws-dev
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      TF_IN_AUTOMATION: "true"
+      AWS_REGION: ap-south-1
+      AWS_ACCOUNT_ID: "732264765658"
+      STATE_BUCKET: enterprise-data-platform-tfstate-732264765658
+      DEPLOYMENT_ROLE_ARN: arn:aws:iam::732264765658:role/enterprise-data-platform-shared-deployment-role
+      GITHUB_ACTIONS_ROLE_ARN: arn:aws:iam::732264765658:role/enterprise-data-platform-shared-github-actions-role
+      SECURITY_ALERTS_TOPIC_ARN: arn:aws:sns:ap-south-1:732264765658:enterprise-data-platform-shared-security-alerts
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials with GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-actions-apply-${{ github.run_id }}
+
+      - name: Verify OIDC entry identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_ARN_PREFIX="arn:aws:sts::${AWS_ACCOUNT_ID}:assumed-role/enterprise-data-platform-shared-github-actions-role/"
+          CALLER_ARN="$(aws sts get-caller-identity --query Arn --output text)"
+          echo "Authenticated through the GitHub Actions OIDC entry role."
+          case "${CALLER_ARN}" in
+            "${EXPECTED_ARN_PREFIX}"*) ;;
+            *)
+              echo "Unexpected AWS caller identity."
+              exit 1
+              ;;
+          esac
+
+      - name: Set Terraform working directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ inputs.stack }}" in
+            kms-secrets)
+              echo "TF_WORKING_DIR=infrastructure/terraform/kms-secrets" >> "$GITHUB_ENV"
+              echo "TF_STATE_KEY=kms-secrets/terraform.tfstate" >> "$GITHUB_ENV"
+              echo "TF_BACKEND_SESSION=terraform-kms-secrets-apply-backend" >> "$GITHUB_ENV"
+              ;;
+            cost-controls)
+              echo "TF_WORKING_DIR=infrastructure/terraform/cost-controls" >> "$GITHUB_ENV"
+              echo "TF_STATE_KEY=cost-controls/terraform.tfstate" >> "$GITHUB_ENV"
+              echo "TF_BACKEND_SESSION=terraform-cost-controls-apply-backend" >> "$GITHUB_ENV"
+              ;;
+            environments/dev)
+              echo "TF_WORKING_DIR=infrastructure/terraform/environments/dev" >> "$GITHUB_ENV"
+              echo "TF_STATE_KEY=dev/terraform.tfstate" >> "$GITHUB_ENV"
+              echo "TF_BACKEND_SESSION=terraform-dev-apply-backend" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "Unsupported stack."
+              exit 1
+              ;;
+          esac
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: Generate ephemeral backend configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TF_WORKING_DIR"
+          cat > backend.hcl <<EOF
+          bucket       = "${STATE_BUCKET}"
+          key          = "${TF_STATE_KEY}"
+          region       = "${AWS_REGION}"
+          encrypt      = true
+          use_lockfile = true
+
+          assume_role = {
+            role_arn     = "${DEPLOYMENT_ROLE_ARN}"
+            session_name = "${TF_BACKEND_SESSION}"
+          }
+          EOF
+
+      - name: Generate ephemeral Terraform variables
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TF_WORKING_DIR"
+          cat > terraform.tfvars <<EOF
+          aws_account_id      = "${AWS_ACCOUNT_ID}"
+          deployment_role_arn = "${DEPLOYMENT_ROLE_ARN}"
+          EOF
+
+          if [ "${{ inputs.stack }}" = "cost-controls" ]; then
+            cat >> terraform.tfvars <<EOF
+          sns_topic_arn = "${SECURITY_ALERTS_TOPIC_ARN}"
+          EOF
+          fi
+
+      - name: Terraform format check
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TF_WORKING_DIR"
+          terraform fmt -check -recursive
+
+      - name: Terraform init
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TF_WORKING_DIR"
+          terraform init -input=false -backend-config=backend.hcl
+
+      - name: Terraform validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TF_WORKING_DIR"
+          terraform validate
+
+      - name: Terraform fresh plan after approval
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TF_WORKING_DIR"
+          terraform plan -input=false -out=tfplan
+
+      - name: Terraform apply fresh plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TF_WORKING_DIR"
+          terraform apply -input=false -auto-approve tfplan
